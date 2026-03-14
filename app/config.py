@@ -18,6 +18,10 @@ def _as_int(value: str | None, default: int) -> int:
         return default
 
 
+def _normalize_origin(value: str) -> str:
+    return value.strip().rstrip("/")
+
+
 @dataclass(frozen=True)
 class Settings:
     app_name: str
@@ -26,6 +30,7 @@ class Settings:
     port: int
     log_level: str
     cors_origins: str
+    cors_origin_regex: str | None
     frontend_url: str
 
     database_url: str
@@ -53,7 +58,18 @@ class Settings:
 
     @property
     def cors_origins_list(self) -> list[str]:
-        return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
+        origins: list[str] = []
+
+        for raw_origin in self.cors_origins.split(","):
+            origin = _normalize_origin(raw_origin)
+            if origin and origin not in origins:
+                origins.append(origin)
+
+        frontend_origin = _normalize_origin(self.frontend_url)
+        if frontend_origin and frontend_origin not in origins:
+            origins.append(frontend_origin)
+
+        return origins
 
 
 @lru_cache(maxsize=1)
@@ -70,6 +86,7 @@ def get_settings() -> Settings:
             "CORS_ORIGINS",
             "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173",
         ),
+        cors_origin_regex=os.getenv("CORS_ORIGIN_REGEX"),
         frontend_url=os.getenv("FRONTEND_URL", "http://localhost:3000"),
         database_url=os.getenv("DATABASE_URL", "sqlite:///./office_agent.db"),
         smtp_host=os.getenv("SMTP_HOST", "smtp.example.com"),
