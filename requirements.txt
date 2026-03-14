@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+pydantic
+python-dotenv
+sqlalchemy
+apscheduler
+pandas
+openpyxl
+python-multipart
+google-api-python-client
+google-auth
+google-auth-oauthlib
+google-genai
+httpx
+
