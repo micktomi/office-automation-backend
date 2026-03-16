@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual env
+venv/
+.venv/
+
+# Local databases
+*.db
+
+# Google auth
+token.json
+client_secret.json
+
+# Tests coverage
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+.next/
+
+# Env
+.env
+.env.local
