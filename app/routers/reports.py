@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -51,6 +51,49 @@ def report_summary(days: int = Query(default=30, ge=1, le=365), db: Session = De
         "eligible_for_send": len(result.eligible_for_send),
         "skipped": result.total_skipped,
         "errors": result.errors,
+    }
+
+
+@router.get("/daily-summary")
+def daily_summary(db: Session = Depends(get_db)):
+    """
+    Returns a specialized summary for the 'Smart Daily Dashboard'.
+    """
+    from app.services.email_service import email_service
+    from app.services.insurance_service import insurance_service
+    
+    today = datetime.now(timezone.utc).date()
+    
+    # 1. Policies expiring in 7 days
+    seven_days_out = today + timedelta(days=7)
+    expiring_7_days = db.query(Policy).filter(
+        Policy.expiry_date <= seven_days_out,
+        Policy.expiry_date >= today,
+        Policy.status.notin_(["renewed", "archived"])
+    ).count()
+    
+    # 2. Expired policies
+    expired_count = db.query(Policy).filter(
+        Policy.expiry_date < today,
+        Policy.status.notin_(["renewed", "archived"])
+    ).count()
+    
+    # 3. Clients who didn't answer SMS (Checking ReminderLog for SMS and no subsequent activity)
+    # For now, we count policies with reminder_attempts > 0 and no renewal
+    no_answer_count = db.query(Policy).filter(
+        Policy.reminder_attempts > 0,
+        Policy.status.notin_(["renewed", "archived"])
+    ).count()
+    
+    # 4. Emails needing reply
+    needs_reply = email_service.list_needs_reply(db, limit=50)
+    
+    return {
+        "date": today.isoformat(),
+        "expiring_7_days": expiring_7_days,
+        "expired": expired_count,
+        "no_answer_sms": no_answer_count,
+        "emails_needing_reply": len(needs_reply),
     }
 
 

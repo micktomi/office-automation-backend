@@ -147,6 +147,15 @@ async def upload_policies(
     }
 
 
+@router.post("/batch-sms-reminders")
+async def batch_sms_reminders(days: int = 10, db: Session = Depends(get_db)):
+    """
+    Sends bulk SMS to all policies expiring in 'days' days.
+    """
+    result = await insurance_service.batch_send_sms(db, days=days)
+    return result
+
+
 @router.get("/alerts", response_model=list[InsuranceAlert])
 def list_insurance_alerts(
     status: str | None = Query(default=None, description="pending_approval | approved | dismissed"),

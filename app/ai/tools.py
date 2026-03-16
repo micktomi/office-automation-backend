@@ -138,6 +138,11 @@ async def _insurance_scan(payload: dict[str, Any], db: Session) -> Any:
     )
 
 
+async def _insurance_batch_sms(payload: dict[str, Any], db: Session) -> Any:
+    days = _as_int(payload.get("days"), 10)
+    return await insurance_service.batch_send_sms(db, days=days)
+
+
 async def _insurance_approve(payload: dict[str, Any], db: Session) -> Any:
     alert_id = payload.get("alert_id") or payload.get("policy_id") or payload.get("id")
     if not isinstance(alert_id, str) or not alert_id.strip():
@@ -230,6 +235,7 @@ TOOLS: dict[str, ToolHandler] = {
     "calendar.delete": _calendar_delete,
     "insurance.alerts": _insurance_alerts,
     "insurance.scan": _insurance_scan,
+    "insurance.batch_sms": _insurance_batch_sms,
     "insurance.approve": _insurance_approve,
     "insurance.dismiss": _insurance_dismiss,
     "insurance.notify": _insurance_notify,

@@ -89,6 +89,7 @@ async def handle_chat_message(
         "delete_calendar_event": "calendar.delete",
         "list_insurance_alerts": "insurance.alerts",
         "scan_insurance": "insurance.scan",
+        "batch_sms_reminders": "insurance.batch_sms",
         "list_documents": "documents.list",
         "list_tasks": "tasks.list",
         "create_task": "tasks.create",
