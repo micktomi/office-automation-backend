@@ -96,7 +96,21 @@ def google_callback(
         token_path.parent.mkdir(parents=True, exist_ok=True)
         token_path.write_text(flow.credentials.to_json(), encoding="utf-8")
 
-        return RedirectResponse(url=f"{settings.frontend_url}?google=connected")
+        token = "test-session"
+        print("SETTING COOKIE session =", token)
+        response = RedirectResponse(
+            url=f"{settings.frontend_url}?google=connected"
+        )
+        response.set_cookie(
+            key="session",
+            value=token,
+            httponly=True,
+            secure=True,
+            samesite="none",
+            path="/"
+        )
+
+        return response
     except HTTPException:
         raise
     except Exception as exc:
