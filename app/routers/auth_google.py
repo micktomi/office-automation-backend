@@ -18,14 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 def _build_redirect_uri(request: Request) -> str:
-    settings = get_settings()
-    if settings.google_redirect_uri and settings.google_redirect_uri != "http://127.0.0.1:3001/auth/google/callback":
-        return settings.google_redirect_uri
-
-    scheme = request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0].strip()
-    host = request.headers.get("x-forwarded-host", request.headers.get("host", request.url.netloc))
-    path = request.app.url_path_for("google_callback")
-    return f"{scheme}://{host}{path}"
+    return get_settings().google_redirect_uri
 
 
 @router.get("/start")
