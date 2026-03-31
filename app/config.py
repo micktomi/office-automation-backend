@@ -86,7 +86,7 @@ def get_settings() -> Settings:
             "CORS_ORIGINS",
             "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173",
         ),
-        cors_origin_regex=os.getenv("CORS_ORIGIN_REGEX"),
+        cors_origin_regex=os.getenv("CORS_ORIGIN_REGEX") or r"^https://.*\.vercel\.app$",
         frontend_url=os.getenv("FRONTEND_URL", "http://localhost:3000"),
         database_url=os.getenv("DATABASE_URL", "sqlite:///./office_agent.db"),
         smtp_host=os.getenv("SMTP_HOST", "smtp.example.com"),
