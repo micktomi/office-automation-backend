@@ -3,15 +3,20 @@ from __future__ import annotations
 import logging
 import os
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote_plus
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Depends
 from fastapi.responses import JSONResponse, RedirectResponse
+from sqlalchemy.orm import Session
+from googleapiclient.discovery import build
 
 from app.config import get_settings
 from app.integrations.google.oauth import get_google_flow
 from app.integrations.google.oauth_state import oauth_state_store
+from app.models.database import get_db
+from app.models.user import User
 
 router = APIRouter(prefix="/auth/google", tags=["auth_google"])
 logger = logging.getLogger(__name__)
