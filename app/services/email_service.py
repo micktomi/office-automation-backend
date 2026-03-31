@@ -270,8 +270,9 @@ class EmailService:
         limit: int,
         include_archived: bool = False,
         include_body: bool = False,
+        service: Any | None = None,
     ) -> list[dict[str, Any]]:
-        service = self._load_gmail_service()
+        service = service or self._load_gmail_service()
         if service is None:
             return []
 
@@ -531,10 +532,20 @@ class EmailService:
 
     def sync_inbox(
         self, db: Session, *, days_ahead: int = 30, limit: int = 30
-    ) -> dict[str, int]:
+    ) -> dict[str, Any]:
         if not self._google_token_exists():
             logger.info("EmailService: sync skipped because Gmail token is missing")
             return {"processed": 0, "skipped": 0, "status": "skip"}
+
+        service = self._load_gmail_service()
+        if service is None:
+            logger.info("EmailService: sync failed because Gmail credentials are invalid or missing scopes")
+            return {
+                "processed": 0,
+                "skipped": 0,
+                "status": "error",
+                "message": "Το Gmail OAuth token είναι άκυρο ή λείπουν scopes. Κάνε ξανά σύνδεση με Google.",
+            }
 
         if not _acquire_sync_slot():
             logger.info("EmailService: sync skipped due to cooldown")
@@ -544,6 +555,7 @@ class EmailService:
             limit=self._coerce_int(limit, 30),
             include_archived=False,
             include_body=True,
+            service=service,
         )
         if gmail_rows:
             self._upsert_synced_emails(db, gmail_rows)

@@ -8,11 +8,16 @@ from google_auth_oauthlib.flow import Flow
 
 from app.config import get_settings
 
-SCOPES = (
-    "openid",
-    "https://www.googleapis.com/auth/userinfo.email",
-    "https://www.googleapis.com/auth/userinfo.profile",
-)
+
+def _build_google_oauth_scopes() -> tuple[str, ...]:
+    settings = get_settings()
+    scopes = (
+        "openid",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+        *settings.google_scopes,
+    )
+    return tuple(dict.fromkeys(scopes))
 
 
 def get_google_flow(
@@ -27,14 +32,14 @@ def get_google_flow(
         client_config = json.loads(base64.b64decode(credentials_json_b64))
         flow = Flow.from_client_config(
             client_config,
-            scopes=SCOPES,
+            scopes=_build_google_oauth_scopes(),
             state=state,
             autogenerate_code_verifier=autogenerate_code_verifier,
         )
     else:
         flow = Flow.from_client_secrets_file(
             settings.google_credentials_file,
-            scopes=SCOPES,
+            scopes=_build_google_oauth_scopes(),
             state=state,
             autogenerate_code_verifier=autogenerate_code_verifier,
         )

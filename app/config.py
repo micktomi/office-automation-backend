@@ -107,7 +107,7 @@ def get_settings() -> Settings:
         ),
         google_token_file=str((backend_root / os.getenv("GOOGLE_TOKEN_FILE", "token.json")).resolve()),
         google_scopes=(
-            "https://www.googleapis.com/auth/gmail.modify",
+            "https://www.googleapis.com/auth/gmail.readonly",
             "https://www.googleapis.com/auth/calendar",
             "https://www.googleapis.com/auth/drive",
         ),
