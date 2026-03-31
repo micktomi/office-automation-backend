@@ -96,7 +96,7 @@ def google_callback(
         token_path.parent.mkdir(parents=True, exist_ok=True)
         token_path.write_text(flow.credentials.to_json(), encoding="utf-8")
 
-        return RedirectResponse(url=f"{settings.frontend_url}/login?google=connected")
+        return RedirectResponse(url=f"{settings.frontend_url}?google=connected")
     except HTTPException:
         raise
     except Exception as exc:
