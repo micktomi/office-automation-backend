@@ -91,6 +91,11 @@ def complete_task(task_id: str, body: TaskUpdate | None = None) -> TaskResponse:
     return TaskResponse(**updated)
 
 
+@router.get("/ping")
+def tasks_ping() -> dict[str, Any]:
+    return {"tasks": "ok"}
+
+
 @router.get("/{task_id}", summary="Λεπτομέρειες εργασίας", response_model=TaskResponse)
 def get_task(task_id: str) -> TaskResponse:
     with _TASKS_LOCK:
@@ -100,8 +105,3 @@ def get_task(task_id: str) -> TaskResponse:
         raise HTTPException(status_code=404, detail="Task δεν βρέθηκε")
 
     return TaskResponse(**_normalize_task(row))
-
-
-@router.get("/ping")
-def tasks_ping() -> dict[str, Any]:
-    return {"tasks": "ok"}

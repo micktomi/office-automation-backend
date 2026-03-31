@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
 
 # Virtual env
 venv/
@@ -9,10 +10,12 @@ venv/
 
 # Local databases
 *.db
+*.db.bak
 
 # Google auth
 token.json
 client_secret.json
+secrets/
 
 # Tests coverage
 .coverage
@@ -25,6 +28,12 @@ node_modules/
 # Env
 .env
 .env.local
+*.env.swp
+*.swp
 
-secrets/
-*.db
+# Logs
+*.log
+server.log
+
+# Misc
+.gitignore.save

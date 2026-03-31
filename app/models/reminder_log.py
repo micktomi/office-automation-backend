@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from app.models.database import Base
 
 class ReminderLog(Base):
-    __tablename__ = "reminder_logs"
+    __tablename__ = "reminders"
 
     id = Column(Integer, primary_key=True, index=True)
     policy_id = Column(Integer, ForeignKey("policies.id"), nullable=False)

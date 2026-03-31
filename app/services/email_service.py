@@ -3,9 +3,17 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import os
 import re
 import smtplib
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
+from threading import Lock
+
+# Use a Lock for Gmail service calls as the client instance is not thread-safe
+_GMAIL_CLIENT_LOCK = Lock()
+_SYNC_STATE_LOCK = Lock()
+LAST_SYNC: datetime | None = None
 from email.message import EmailMessage
 from email.utils import parsedate_to_datetime, parseaddr
 from pathlib import Path
@@ -13,14 +21,32 @@ from typing import Any
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
+from googleapiclient.errors import HttpError
 from googleapiclient.discovery import build
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.engine.reminder_cycle import run_reminder_cycle
+from app.models.email_message import SyncedEmail
 from app.models.policy import Policy
 
 logger = logging.getLogger(__name__)
+
+
+def should_sync() -> bool:
+    with _SYNC_STATE_LOCK:
+        if LAST_SYNC is None:
+            return True
+        return datetime.now(timezone.utc) - LAST_SYNC > timedelta(seconds=60)
+
+
+def _acquire_sync_slot() -> bool:
+    global LAST_SYNC
+    now = datetime.now(timezone.utc)
+    with _SYNC_STATE_LOCK:
+        if LAST_SYNC is not None and now - LAST_SYNC <= timedelta(seconds=60):
+            return False
+        LAST_SYNC = now
+        return True
 
 
 class EmailService:
@@ -28,18 +54,89 @@ class EmailService:
         self.settings = get_settings()
         self._email_cache: dict[str, dict[str, Any]] = {}
 
+    @staticmethod
+    def _normalize_text(value: str | None) -> str:
+        return re.sub(r"\s+", " ", value or "").strip().casefold()
+
+    def _classify_email(self, subject: str, sender: str, body: str) -> dict[str, str]:
+        combined = self._normalize_text(" ".join(part for part in [subject, sender, body] if part))
+        sender_email = parseaddr(sender)[1].casefold()
+
+        noise_markers = (
+            "mail delivery failed",
+            "delivery failure",
+            "undeliverable",
+            "bounce",
+            "mailer-daemon",
+            "postmaster",
+            "newsletter",
+            "unsubscribe",
+            "no-reply",
+            "noreply",
+            "do not reply",
+            "automated message",
+            "promotion",
+            "marketing",
+            "sale",
+        )
+        insurance_markers = (
+            "ασφαλισ",
+            "συμβολ",
+            "λήξη",
+            "ληξη",
+            "ανανε",
+            "renewal",
+            "policy",
+            "insurance",
+            "claim",
+            "coverage",
+        )
+
+        if any(marker in combined for marker in noise_markers) or any(marker in sender_email for marker in ("mailer-daemon", "postmaster", "noreply", "no-reply")):
+            return {
+                "classification": "irrelevant",
+                "classification_label": "Άκυρο",
+            }
+
+        if any(marker in combined for marker in insurance_markers):
+            return {
+                "classification": "important",
+                "classification_label": "Ασφαλιστήριο",
+            }
+
+        return {
+            "classification": "probable",
+            "classification_label": "Πελάτης",
+        }
+
+    def _ensure_email_classification(self, record: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(record)
+        if normalized.get("classification") and normalized.get("classification_label"):
+            return normalized
+
+        classification = self._classify_email(
+            subject=str(normalized.get("subject") or ""),
+            sender=str(normalized.get("sender") or ""),
+            body=str(normalized.get("body") or ""),
+        )
+        normalized.update(classification)
+        return normalized
+
     def _load_gmail_service(self):
-        token_path = Path(self.settings.google_token_file)
-        if not token_path.exists():
+        token_path = os.getenv("GOOGLE_TOKEN_FILE", self.settings.google_token_file)
+        
+        if not os.path.exists(token_path):
+            print("Google token not found, Gmail integration disabled")
             return None
 
         try:
             creds = Credentials.from_authorized_user_file(
-                str(token_path), self.settings.google_scopes
+                token_path, self.settings.google_scopes
             )
             if creds and creds.expired and creds.refresh_token:
                 creds.refresh(Request())
-                token_path.write_text(creds.to_json(), encoding="utf-8")
+                with open(token_path, "w", encoding="utf-8") as f:
+                    f.write(creds.to_json())
 
             if not creds or not creds.valid:
                 return None
@@ -51,6 +148,26 @@ class EmailService:
 
     def _google_token_exists(self) -> bool:
         return Path(self.settings.google_token_file).exists()
+
+    @staticmethod
+    def _parse_received_at(value: Any) -> datetime | None:
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc)
+
+        if not isinstance(value, str) or not value.strip():
+            return None
+
+        cleaned = value.strip().replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(cleaned)
+        except ValueError:
+            return None
+
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
     @staticmethod
     def _coerce_int(value: Any, default: int) -> int:
@@ -102,6 +219,8 @@ class EmailService:
             "status": status,
             "unread": policy.reminder_attempts == 0,
             "received_at": policy.created_at.isoformat() if policy.created_at else None,
+            "classification": "important",
+            "classification_label": "Ασφαλιστήριο",
         }
 
     def _gmail_to_email_record(self, message: dict[str, Any]) -> dict[str, Any]:
@@ -130,7 +249,7 @@ class EmailService:
                 received_at = None
 
         labels = message.get("labelIds") or []
-        return {
+        record = {
             "id": message.get("id", ""),
             "gmail_id": message.get("id"),
             "subject": subject,
@@ -143,6 +262,9 @@ class EmailService:
             "received_at": received_at,
         }
 
+        record.update(self._classify_email(subject=subject, sender=sender, body=record["body"]))
+        return record
+
     def _fetch_gmail_emails(
         self,
         limit: int,
@@ -153,41 +275,171 @@ class EmailService:
         if service is None:
             return []
 
-        try:
-            list_kwargs: dict[str, Any] = {
-                "userId": "me",
-                "maxResults": self._coerce_int(limit, 30),
-            }
-            if not include_archived:
-                list_kwargs["labelIds"] = ["INBOX"]
+        last_error: Exception | None = None
 
-            resp = service.users().messages().list(**list_kwargs).execute()
-            refs = resp.get("messages") or []
-            rows: list[dict[str, Any]] = []
-
-            for ref in refs:
-                msg_id = ref.get("id")
-                if not msg_id:
-                    continue
-
-                get_kwargs: dict[str, Any] = {
+        for attempt in range(3):
+            try:
+                list_kwargs: dict[str, Any] = {
                     "userId": "me",
-                    "id": msg_id,
-                    "format": "full" if include_body else "metadata",
+                    "maxResults": self._coerce_int(limit, 30),
                 }
-                if not include_body:
-                    get_kwargs["metadataHeaders"] = ["Subject", "From", "Date"]
+                if not include_archived:
+                    list_kwargs["labelIds"] = ["INBOX"]
 
-                detail = service.users().messages().get(**get_kwargs).execute()
+                with _GMAIL_CLIENT_LOCK:
+                    resp = service.users().messages().list(**list_kwargs).execute()
+                    refs = resp.get("messages") or []
 
-                record = self._gmail_to_email_record(detail)
-                rows.append(record)
-                self._email_cache[record["id"]] = record
+                    if not refs:
+                        return []
 
-            return rows
-        except Exception as exc:
-            logger.warning("EmailService: Gmail fetch failed: %s", exc)
-            return []
+                    rows: list[dict[str, Any]] = []
+
+                    def batch_callback(request_id, response, exception):
+                        if exception:
+                            logger.warning("EmailService: Batch fetch error: %s", exception)
+                        else:
+                            record = self._gmail_to_email_record(response)
+                            rows.append(record)
+                            self._email_cache[record["id"]] = record
+
+                    batch = service.new_batch_http_request(callback=batch_callback)
+
+                    for ref in refs:
+                        msg_id = ref.get("id")
+                        if not msg_id:
+                            continue
+
+                        get_kwargs: dict[str, Any] = {
+                            "userId": "me",
+                            "id": msg_id,
+                            "format": "full" if include_body else "metadata",
+                        }
+                        if not include_body:
+                            get_kwargs["metadataHeaders"] = ["Subject", "From", "Date"]
+
+                        batch.add(service.users().messages().get(**get_kwargs))
+
+                    batch.execute()
+
+                rows.sort(key=lambda x: x.get("received_at") or "", reverse=True)
+                return rows
+            except HttpError as exc:
+                last_error = exc
+                status = getattr(getattr(exc, "resp", None), "status", None)
+                reason = str(exc)
+                if status in {429, 403} and "rateLimitExceeded" in reason and attempt < 2:
+                    wait_seconds = attempt + 1
+                    logger.warning(
+                        "EmailService: Gmail rate limited, retrying in %s seconds: %s",
+                        wait_seconds,
+                        exc,
+                    )
+                    time.sleep(wait_seconds)
+                    continue
+                logger.warning("EmailService: Gmail fetch failed: %s", exc)
+                return []
+            except Exception as exc:
+                last_error = exc
+                logger.warning("EmailService: Gmail fetch failed: %s", exc)
+                return []
+
+        if last_error:
+            logger.warning("EmailService: Gmail fetch exhausted retries: %s", last_error)
+        return []
+
+    def _upsert_synced_emails(self, db: Session, rows: list[dict[str, Any]]) -> None:
+        bind = db.get_bind()
+        dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
+        table = SyncedEmail.__table__
+        for row in rows:
+            record = self._ensure_email_classification(dict(row))
+            email_id = str(record.get("gmail_id") or record.get("id") or "").strip()
+            if not email_id:
+                continue
+
+            values = {
+                "id": email_id,
+                "gmail_id": str(record.get("gmail_id") or email_id),
+                "thread_id": str(record.get("thread_id") or "") or None,
+                "subject": str(record.get("subject") or "(Χωρίς θέμα)"),
+                "sender": str(record.get("sender") or "unknown@unknown"),
+                "sender_email": str(record.get("sender_email") or "") or None,
+                "body": str(record.get("body") or ""),
+                "classification": str(record.get("classification") or "probable"),
+                "classification_label": str(record.get("classification_label") or "Πελάτης"),
+                "priority": str(record.get("priority") or "medium"),
+                "status": str(record.get("status") or "inbox"),
+                "unread": bool(record.get("unread", True)),
+                "received_at": self._parse_received_at(record.get("received_at")),
+                "synced_at": datetime.now(timezone.utc),
+            }
+
+            if dialect_name == "sqlite":
+                from sqlalchemy.dialects.sqlite import insert as dialect_insert
+            elif dialect_name in {"postgresql", "postgres"}:
+                from sqlalchemy.dialects.postgresql import insert as dialect_insert
+            else:
+                dialect_insert = None
+
+            if dialect_insert is None:
+                existing = db.query(SyncedEmail).filter(SyncedEmail.gmail_id == values["gmail_id"]).first()
+                if existing is not None:
+                    values["processed"] = existing.processed
+                db.merge(SyncedEmail(**values))
+            else:
+                update_values = {key: value for key, value in values.items() if key != "id"}
+                stmt = dialect_insert(table).values(**values).on_conflict_do_update(
+                    index_elements=[table.c.gmail_id],
+                    set_=update_values,
+                )
+                db.execute(stmt)
+
+            self._email_cache[email_id] = record
+
+        db.commit()
+
+    def _query_synced_emails(
+        self,
+        db: Session,
+        *,
+        include_archived: bool,
+        include_noise: bool,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        query = db.query(SyncedEmail)
+        if not include_archived:
+            query = query.filter(SyncedEmail.status != "archived")
+
+        rows = (
+            query.order_by(SyncedEmail.received_at.desc(), SyncedEmail.synced_at.desc())
+            .limit(limit)
+            .all()
+        )
+
+        records = [self._ensure_email_classification(self._synced_email_to_record(row)) for row in rows]
+        if not include_noise:
+            records = [row for row in records if row.get("classification") != "irrelevant"]
+        return records
+
+    @staticmethod
+    def _synced_email_to_record(row: SyncedEmail) -> dict[str, Any]:
+        return {
+            "id": row.id,
+            "gmail_id": row.gmail_id or row.id,
+            "thread_id": row.thread_id,
+            "subject": row.subject,
+            "sender": row.sender,
+            "sender_email": row.sender_email,
+            "body": row.body,
+            "classification": row.classification,
+            "classification_label": row.classification_label,
+            "priority": row.priority,
+            "status": row.status,
+            "unread": row.unread,
+            "processed": row.processed,
+            "received_at": row.received_at.astimezone(timezone.utc).isoformat() if row.received_at else None,
+        }
 
     @staticmethod
     def _decode_gmail_body(data: str | None) -> str:
@@ -258,23 +510,19 @@ class EmailService:
         db: Session,
         *,
         include_archived: bool = False,
+        include_noise: bool = False,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
-        gmail_rows = self._fetch_gmail_emails(
-            limit=limit, include_archived=include_archived
+        synced_rows = self._query_synced_emails(
+            db,
+            include_archived=include_archived,
+            include_noise=include_noise,
+            limit=limit,
         )
-        if gmail_rows or self._google_token_exists():
-            return gmail_rows
-
-        query = db.query(Policy)
-        if not include_archived:
-            query = query.filter(Policy.status != "archived")
-
-        rows = query.order_by(Policy.created_at.desc()).limit(limit).all()
-        return [self._policy_to_email(row) for row in rows]
+        return synced_rows
 
     def list_needs_reply(self, db: Session, *, limit: int = 50) -> list[dict[str, Any]]:
-        rows = self.list_emails(db, include_archived=False, limit=limit)
+        rows = self.list_emails(db, include_archived=False, include_noise=False, limit=limit)
         return [
             row
             for row in rows
@@ -284,21 +532,29 @@ class EmailService:
     def sync_inbox(
         self, db: Session, *, days_ahead: int = 30, limit: int = 30
     ) -> dict[str, int]:
-        gmail_rows = self._fetch_gmail_emails(
-            limit=self._coerce_int(limit, 30), include_archived=False
-        )
-        if gmail_rows or self._google_token_exists():
-            return {"processed": len(gmail_rows), "skipped": 0}
+        if not self._google_token_exists():
+            logger.info("EmailService: sync skipped because Gmail token is missing")
+            return {"processed": 0, "skipped": 0, "status": "skip"}
 
-        result = run_reminder_cycle(
-            db_session=db, days_ahead=self._coerce_int(days_ahead, 30)
+        if not _acquire_sync_slot():
+            logger.info("EmailService: sync skipped due to cooldown")
+            return {"processed": 0, "skipped": 0, "status": "skip"}
+
+        gmail_rows = self._fetch_gmail_emails(
+            limit=self._coerce_int(limit, 30),
+            include_archived=False,
+            include_body=True,
         )
-        return {
-            "processed": len(result.eligible_for_send),
-            "skipped": result.total_skipped,
-        }
+        if gmail_rows:
+            self._upsert_synced_emails(db, gmail_rows)
+            return {"processed": len(gmail_rows), "skipped": 0, "status": "ok"}
+        return {"processed": 0, "skipped": 0, "status": "ok"}
 
     def get_email_context(self, db: Session, email_id: str) -> dict[str, Any] | None:
+        synced_email = db.query(SyncedEmail).filter(SyncedEmail.id == email_id).first()
+        if synced_email:
+            return self._ensure_email_classification(self._synced_email_to_record(synced_email))
+
         policy_id = self._try_parse_policy_id(email_id)
         if policy_id is not None:
             policy = db.query(Policy).filter(Policy.id == policy_id).first()
@@ -307,7 +563,7 @@ class EmailService:
 
         cached = self._email_cache.get(email_id)
         if cached:
-            return cached
+            return self._ensure_email_classification(cached)
 
         return None
 
@@ -326,16 +582,17 @@ class EmailService:
         service = self._load_gmail_service()
         if service:
             try:
-                message = EmailMessage()
-                message.set_content(body)
-                message["To"] = to
-                message["From"] = "me"
-                message["Subject"] = subject
+                with _GMAIL_CLIENT_LOCK:
+                    message = EmailMessage()
+                    message.set_content(body)
+                    message["To"] = to
+                    message["From"] = "me"
+                    message["Subject"] = subject
 
-                encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
-                service.users().messages().send(
-                    userId="me", body={"raw": encoded_message}
-                ).execute()
+                    encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
+                    service.users().messages().send(
+                        userId="me", body={"raw": encoded_message}
+                    ).execute()
 
                 log_action(
                     action_type="Αποστολή email υπενθύμισης",

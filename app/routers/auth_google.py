@@ -44,7 +44,11 @@ def google_login_alias():
 
 
 @router.get("/callback")
-def google_callback(code: str = Query(...), state: str | None = Query(default=None)):
+def google_callback(code: str | None = Query(default=None), state: str | None = Query(default=None)):
+    if not code:
+        # Returning 400 instead of 422 for scanners and missing params
+        raise HTTPException(status_code=400, detail="Missing OAuth code parameter.")
+
     settings = get_settings()
 
     try:

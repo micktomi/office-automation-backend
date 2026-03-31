@@ -8,4 +8,4 @@ if [[ ! -x "./venv/bin/python" ]]; then
 fi
 
 PORT="${PORT:-3001}"
-./venv/bin/python -m uvicorn app.main:app --reload --port "${PORT}"
+./venv/bin/python -m uvicorn app.main:app --reload --reload-dir app --port "${PORT}"

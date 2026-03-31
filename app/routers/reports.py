@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app.engine.renewal_logic import count_expiring_policies
 from app.engine.reminder_cycle import run_reminder_cycle
 from app.models.database import get_db
 from app.models.policy import Policy
@@ -60,33 +61,27 @@ def daily_summary(db: Session = Depends(get_db)):
     Returns a specialized summary for the 'Smart Daily Dashboard'.
     """
     from app.services.email_service import email_service
-    from app.services.insurance_service import insurance_service
     
     today = datetime.now(timezone.utc).date()
     
     # 1. Policies expiring in 7 days
-    seven_days_out = today + timedelta(days=7)
-    expiring_7_days = db.query(Policy).filter(
-        Policy.expiry_date <= seven_days_out,
-        Policy.expiry_date >= today,
-        Policy.status.notin_(["renewed", "archived"])
-    ).count()
+    expiring_7_days = count_expiring_policies(db, days=7)
     
     # 2. Expired policies
     expired_count = db.query(Policy).filter(
         Policy.expiry_date < today,
-        Policy.status.notin_(["renewed", "archived"])
+        Policy.status.notin_(["renewed", "archived", "notified"])
     ).count()
     
     # 3. Clients who didn't answer SMS (Checking ReminderLog for SMS and no subsequent activity)
     # For now, we count policies with reminder_attempts > 0 and no renewal
     no_answer_count = db.query(Policy).filter(
         Policy.reminder_attempts > 0,
-        Policy.status.notin_(["renewed", "archived"])
+        Policy.status.notin_(["renewed", "archived", "notified"])
     ).count()
     
-    # 4. Emails needing reply
-    needs_reply = email_service.list_needs_reply(db, limit=50)
+    # 4. Emails needing reply (Reduced limit to avoid timeout during summary)
+    needs_reply = email_service.list_needs_reply(db, limit=5)
     
     return {
         "date": today.isoformat(),
@@ -121,14 +116,18 @@ def monthly_expense_report(
         month = datetime.now(timezone.utc).strftime("%Y-%m")
 
     try:
-        year, mon = month.split("-")
-        int(year)
-        int(mon)
+        year_str, mon_str = month.split("-")
+        year = int(year_str)
+        mon = int(mon_str)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="month must be in YYYY-MM format") from exc
 
-    policies = db.query(Policy).all()
-    monthly = [p for p in policies if p.created_at and p.created_at.strftime("%Y-%m") == month]
+    # Filter in DB instead of in-memory for performance
+    from sqlalchemy import extract
+    monthly = db.query(Policy).filter(
+        extract('year', Policy.created_at) == year,
+        extract('month', Policy.created_at) == mon
+    ).all()
 
     breakdown = [
         {

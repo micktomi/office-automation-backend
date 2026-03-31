@@ -6,6 +6,35 @@ from sqlalchemy.orm import Session
 from app.models.policy import Policy
 
 
+DEFAULT_EXPIRING_POLICIES_DAYS = 15
+
+
+def build_expiring_policies_query(db_session: Session, days: int = DEFAULT_EXPIRING_POLICIES_DAYS, client_id: int | None = None):
+    today = datetime.now(timezone.utc).date()
+    target_date = today + timedelta(days=days)
+
+    query = db_session.query(Policy).filter(
+        Policy.expiry_date >= today,
+        Policy.expiry_date <= target_date,
+        Policy.status.notin_(["renewed", "archived", "notified"]),
+    )
+    if client_id is not None:
+        query = query.filter(Policy.client_id == client_id)
+    return query
+
+
+def count_expiring_policies(db_session: Session, days: int = DEFAULT_EXPIRING_POLICIES_DAYS, client_id: int | None = None) -> int:
+    return build_expiring_policies_query(db_session, days=days, client_id=client_id).count()
+
+
+def get_expiring_policies(db_session: Session, days: int = DEFAULT_EXPIRING_POLICIES_DAYS, client_id: int | None = None):
+    return (
+        build_expiring_policies_query(db_session, days=days, client_id=client_id)
+        .order_by(Policy.expiry_date.asc(), Policy.created_at.asc())
+        .all()
+    )
+
+
 def validate_policy_invariants(policy: Policy) -> None:
     """
     Core validation function to enforce domain invariants.
@@ -53,7 +82,7 @@ def get_overdue_policies(db_session: Session):
     policies = (
         db_session.query(Policy)
         .filter(
-            Policy.status.notin_(["renewed", "archived"]),
+            Policy.status.notin_(["renewed", "archived", "notified"]),
             or_(
                 Policy.status == "overdue",
                 Policy.expiry_date < today,

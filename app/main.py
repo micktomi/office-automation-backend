@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -14,6 +15,7 @@ from app.routers import (
     assistant,
     auth,
     auth_google,
+    dashboard,
     clients,
     email,
     insurance,
@@ -25,35 +27,41 @@ from app.services.logging_service import setup_logging
 from app.services.scheduler_service import start_scheduler, stop_scheduler
 
 
-def _run_startup_migrations() -> None:
-    inspector = inspect(engine)
-    if not inspector.has_table("policies"):
-        return
-
-    existing_columns = {column["name"] for column in inspector.get_columns("policies")}
-    migrations = {
-        "policy_number": "ALTER TABLE policies ADD COLUMN policy_number VARCHAR",
-        "insurer": "ALTER TABLE policies ADD COLUMN insurer VARCHAR",
-        "draft_notification": "ALTER TABLE policies ADD COLUMN draft_notification TEXT",
-        "source_email_id": "ALTER TABLE policies ADD COLUMN source_email_id VARCHAR",
-    }
-
-    with engine.begin() as connection:
-        for column_name, statement in migrations.items():
-            if column_name not in existing_columns:
-                connection.execute(text(statement))
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     setup_logging(settings.log_level)
 
-    # Import models to ensure they are registered
-    from app.models import activity_log, policy, reminder_log
+    # Ensure persistent data directory exists (critical on Render)
+    os.makedirs("/app/data", exist_ok=True)
 
+    # Import models to ensure they are registered
+    from app.models import activity_log, client, email_message, policy, reminder_log
+
+    # This creates all tables (clients, policies, reminders, activity_log) 
+    # if they don't exist in office_agent.db
     Base.metadata.create_all(bind=engine)
-    _run_startup_migrations()
+    
+    # Simple migration for client_id if policies table exists but lacks it
+    # (In case someone is migrating from renewals.db by renaming it)
+    inspector = inspect(engine)
+    if inspector.has_table("policies"):
+        existing_columns = {column["name"] for column in inspector.get_columns("policies")}
+        with engine.begin() as connection:
+            if "client_id" not in existing_columns:
+                connection.execute(text("ALTER TABLE policies ADD COLUMN client_id INTEGER"))
+            if "last_notified_at" not in existing_columns:
+                connection.execute(text("ALTER TABLE policies ADD COLUMN last_notified_at DATETIME"))
+    if inspector.has_table("synced_emails"):
+        existing_columns = {column["name"] for column in inspector.get_columns("synced_emails")}
+        with engine.begin() as connection:
+            if "processed" not in existing_columns:
+                connection.execute(text("ALTER TABLE synced_emails ADD COLUMN processed BOOLEAN DEFAULT 0"))
+            if "received_at" not in existing_columns:
+                connection.execute(text("ALTER TABLE synced_emails ADD COLUMN received_at DATETIME"))
+            if "synced_at" not in existing_columns:
+                connection.execute(text("ALTER TABLE synced_emails ADD COLUMN synced_at DATETIME"))
+
     start_scheduler()
     yield
     stop_scheduler()
@@ -90,6 +98,7 @@ def create_app() -> FastAPI:
     app.include_router(messaging.router)
     app.include_router(activity.router)
     app.include_router(clients.router)
+    app.include_router(dashboard.router)
 
     @app.get("/")
     def root():

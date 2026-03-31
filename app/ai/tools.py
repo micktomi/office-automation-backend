@@ -6,6 +6,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.engine.renewal_logic import DEFAULT_EXPIRING_POLICIES_DAYS
 from app.services.email_service import email_service
 from app.services.messaging_service import messaging_service
 from app.services.calendar_service import calendar_service
@@ -41,6 +42,7 @@ async def _email_list(payload: dict[str, Any], db: Session) -> Any:
     return email_service.list_emails(
         db,
         include_archived=_as_bool(payload.get("include_archived"), False),
+        include_noise=_as_bool(payload.get("include_noise"), False),
         limit=_as_int(payload.get("limit"), 50),
     )
 
@@ -126,7 +128,7 @@ async def _insurance_alerts(payload: dict[str, Any], db: Session) -> Any:
     return insurance_service.list_alerts(
         db,
         status=payload.get("status") if isinstance(payload.get("status"), str) else None,
-        days=_as_int(payload.get("days"), 90),
+        days=_as_int(payload.get("days"), DEFAULT_EXPIRING_POLICIES_DAYS),
     )
 
 

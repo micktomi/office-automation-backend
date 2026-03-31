@@ -16,14 +16,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy project
 COPY . .
 
-# Create volume for database and tokens
-VOLUME /app/data
+# Create persistent data directory
+RUN mkdir -p /app/data
 
-# Ensure the database path in the app matches the volume
-# ENV DATABASE_URL=sqlite:///./data/office_agent.db
+# Expose port (Render injects $PORT at runtime)
+EXPOSE $PORT
 
-# Expose port
-EXPOSE 3001
-
-# Run the application
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "3001"]
+# Run the application — use shell form so $PORT is expanded at runtime
+CMD sh -c "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-3001}"

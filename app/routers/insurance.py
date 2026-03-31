@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 from datetime import datetime, timezone
 from typing import Any
 
@@ -9,7 +8,8 @@ from sqlalchemy.orm import Session
 
 from app.adapters.csv_adapter import parse_csv
 from app.adapters.excel_adapter import parse_excel
-from app.engine.renewal_logic import get_upcoming_policies
+from app.adapters.pdf_adapter import parse_pdf
+from app.engine.renewal_logic import DEFAULT_EXPIRING_POLICIES_DAYS
 from app.models.database import get_db
 from app.models.policy import Policy
 from app.schemas.insurance import InsuranceAlert, InsuranceAlertAction, InsuranceScanResult
@@ -24,40 +24,6 @@ class ApproveNotificationRequest(BaseModel):
 
 class PolicyActionRequest(BaseModel):
     policy_id: str
-
-
-def _policy_to_alert(policy: Policy) -> InsuranceAlert:
-    today = datetime.now(timezone.utc).date()
-    days_until_expiry = (policy.expiry_date - today).days
-
-    if policy.status == "renewed":
-        status = "approved"
-    elif policy.status == "archived":
-        status = "dismissed"
-    else:
-        status = "pending_approval"
-
-    draft_notification = (
-        policy.draft_notification
-        or (
-            f"Αγαπητέ/ή {policy.client_name}, το ασφαλιστήριό σας λήγει στις {policy.expiry_date}. "
-            "Προτείνουμε να προχωρήσουμε σε ανανέωση εντός των επόμενων ημερών."
-        )
-    )
-
-    return InsuranceAlert(
-        id=str(policy.id),
-        policy_id=policy.id,
-        policy_holder=policy.client_name,
-        policy_number=policy.policy_number or f"POL-{policy.id:05d}",
-        insurer=policy.insurer or "Γενική Ασφάλιση",
-        email=policy.email,
-        expiry_date=policy.expiry_date.isoformat(),
-        days_until_expiry=days_until_expiry,
-        status=status,
-        draft_notification=draft_notification,
-        created_at=policy.created_at.isoformat() if policy.created_at else datetime.now(timezone.utc).isoformat(),
-    )
 
 
 def _parse_policy_id(value: str) -> int:
@@ -127,7 +93,13 @@ async def upload_policies(
             skipped_duplicates += 1
             continue
 
+        # Link to client
+        client = insurance_service._get_or_create_client(
+            db, name=row["client_name"], email=row["email"]
+        )
+
         policy = Policy(
+            client_id=client.id,
             client_name=row["client_name"],
             email=row["email"],
             expiry_date=row["expiry_date"],
@@ -147,6 +119,152 @@ async def upload_policies(
     }
 
 
+@router.post("/upload-pdf", summary="Upload PDF για ανίχνευση ασφαλιστηρίων")
+async def upload_pdf_policy(
+    file: UploadFile = File(...),
+    warning_days: int = Query(default=90, ge=1, le=3650),
+    db: Session = Depends(get_db),
+):
+    """
+    Scans PDF for insurance policy details using regex + AI fallback.
+    Reuses the email scanning extraction pipeline.
+    """
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only .pdf files are supported")
+
+    raw = await file.read()
+
+    # Step 1: Extract text from PDF
+    try:
+        text, metadata = parse_pdf(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if not text or len(text.strip()) < 10:
+        raise HTTPException(
+            status_code=422,
+            detail="Το PDF δεν περιέχει αναγνώσιμο κείμενο"
+        )
+
+    # Step 2: Reuse email extraction pipeline - Deterministic regex extraction
+    extracted = insurance_service._deterministic_extract_insurance(
+        sender="",  # Not applicable for PDF
+        subject=metadata.get("title") or "",
+        body=text
+    )
+
+    # Step 3: AI fallback if needed (missing critical fields)
+    if insurance_service._should_use_ai_fallback(extracted, text):
+        from app.ai.client import AIClient
+        from app.config import settings
+
+        ai_client = AIClient(settings)
+        ai_extracted = insurance_service._normalize_extracted_insurance(
+            await ai_client.extract_insurance_info(
+                sender="PDF Upload",
+                subject=metadata.get("title") or file.filename,
+                body=text
+            )
+        )
+        extracted = insurance_service._merge_extracted_insurance(ai_extracted, extracted)
+
+    # Step 4: Validate extracted data
+    if not extracted.get("expiry_date"):
+        raise HTTPException(
+            status_code=422,
+            detail="Δεν βρέθηκε ημερομηνία λήξης στο PDF. Παρακαλώ ελέγξτε το αρχείο."
+        )
+
+    # Step 5: Parse expiry date
+    expiry_date = insurance_service._parse_iso_date(extracted.get("expiry_date"))
+    if not expiry_date:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Μη έγκυρη ημερομηνία λήξης: {extracted.get('expiry_date')}"
+        )
+
+    # Step 6: Check age
+    today = datetime.now(timezone.utc).date()
+    days_until_expiry = (expiry_date - today).days
+
+    if days_until_expiry > warning_days:
+        return {
+            "message": "Το ασφαλιστήριο δεν λήγει σύντομα",
+            "expiry_date": expiry_date.isoformat(),
+            "days_until_expiry": days_until_expiry,
+            "warning_threshold": warning_days,
+            "extracted": {
+                k: (v.isoformat() if hasattr(v, 'isoformat') else v)
+                for k, v in extracted.items()
+                if v is not None
+            }
+        }
+
+    # Step 7: Get client info
+    client_name = extracted.get("policy_holder") or "Άγνωστος πελάτης"
+    client_email = extracted.get("email") or "unknown@unknown"
+
+    # Step 8: Check duplicate
+    query = db.query(Policy).filter(Policy.expiry_date == expiry_date)
+    if client_email:
+        query = query.filter(Policy.email == client_email)
+    else:
+        query = query.filter(Policy.client_name == client_name)
+
+    exists = query.first()
+
+    if exists:
+        return {
+            "message": "Το ασφαλιστήριο υπάρχει ήδη στη βάση",
+            "policy_id": exists.id,
+            "existing_policy": {
+                "client_name": exists.client_name,
+                "email": exists.email,
+                "expiry_date": exists.expiry_date.isoformat(),
+                "policy_number": exists.policy_number,
+            }
+        }
+
+    # Step 9: Get/Create Client
+    client = insurance_service._get_or_create_client(
+        db,
+        name=client_name,
+        email=client_email
+    )
+
+    # Step 10: Insert Policy
+    policy = Policy(
+        client_id=client.id,
+        client_name=client_name,
+        email=client_email,
+        policy_number=extracted.get("policy_number"),
+        insurer=extracted.get("insurer"),
+        expiry_date=expiry_date,
+        status="active",
+    )
+    db.add(policy)
+    db.commit()
+    db.refresh(policy)
+
+    return {
+        "message": "Το ασφαλιστήριο εισήχθη επιτυχώς από PDF",
+        "policy_id": policy.id,
+        "days_until_expiry": days_until_expiry,
+        "extracted": {
+            "client_name": client_name,
+            "email": client_email,
+            "policy_number": extracted.get("policy_number"),
+            "insurer": extracted.get("insurer"),
+            "expiry_date": expiry_date.isoformat(),
+        },
+        "metadata": {
+            "pages": metadata.get("pages"),
+            "title": metadata.get("title"),
+            "characters_extracted": len(text),
+        }
+    }
+
+
 @router.post("/batch-sms-reminders")
 async def batch_sms_reminders(days: int = 10, db: Session = Depends(get_db)):
     """
@@ -158,28 +276,31 @@ async def batch_sms_reminders(days: int = 10, db: Session = Depends(get_db)):
 
 @router.get("/alerts", response_model=list[InsuranceAlert])
 def list_insurance_alerts(
-    status: str | None = Query(default=None, description="pending_approval | approved | dismissed"),
-    days: int = Query(default=90, ge=1, le=3650),
+    tab: str = Query(default="expiring", description="expiring | expired"),
+    days: int = Query(default=DEFAULT_EXPIRING_POLICIES_DAYS, ge=1, le=3650),
     db: Session = Depends(get_db),
 ):
-    upcoming = get_upcoming_policies(db, days=days)
+    today = datetime.now(timezone.utc).date()
 
-    base: list[Policy] = list(upcoming)
-    approved = db.query(Policy).filter(Policy.status == "renewed").all()
-    dismissed = db.query(Policy).filter(Policy.status == "archived").all()
+    if tab == "expired":
+        # Get already expired policies (same logic as dashboard)
+        policies = (
+            db.query(Policy)
+            .filter(
+                Policy.expiry_date < today,
+                Policy.status.notin_(["renewed", "archived"]),
+            )
+            .order_by(Policy.expiry_date.asc())
+            .all()
+        )
+    elif tab == "expiring":
+        # Get expiring soon policies (same logic as dashboard)
+        from app.engine.renewal_logic import get_expiring_policies
+        policies = get_expiring_policies(db, days=days)
+    else:
+        policies = []
 
-    seen_ids = {p.id for p in base}
-    for policy in approved + dismissed:
-        if policy.id not in seen_ids:
-            base.append(policy)
-
-    alerts = [_policy_to_alert(p) for p in base]
-
-    if status:
-        alerts = [a for a in alerts if a.status == status]
-
-    alerts.sort(key=lambda a: (a.days_until_expiry if a.days_until_expiry is not None else 99999))
-    return alerts
+    return [insurance_service._policy_to_alert(p) for p in policies]
 
 
 @router.post("/alerts/{alert_id}/approve", response_model=InsuranceAlertAction)

@@ -177,7 +177,7 @@ class AIClient:
         prompt = prompt_template.replace("{sender}", sender).replace("{subject}", subject).replace("{body}", body)
 
         try:
-            return await self._generate_content(prompt, temperature=0.4)
+            return await self._generate_content(prompt, temperature=0.1)
         except Exception as e:
             logger.error("[REPLY_GENERATOR] Failed: %s", e)
             return "Ευχαριστούμε για το μήνυμά σας. Θα επικοινωνήσουμε σύντομα."

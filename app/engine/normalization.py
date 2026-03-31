@@ -28,3 +28,25 @@ def normalize_policy_row(raw: dict) -> dict:
         "email": normalize_email(raw.get("email")),
         "expiry_date": raw.get("expiry_date"),
     }
+import re
+from datetime import datetime
+
+def extract_expiry_from_text(text: str | None):
+    if not text:
+        return None
+
+    text = normalize_text(text)
+
+    # βρίσκει ημερομηνίες τύπου 01/02/2026
+    matches = re.findall(r"\d{2}/\d{2}/\d{4}", text)
+
+    if not matches:
+        return None
+
+    # παίρνουμε την τελευταία ημερομηνία (συνήθως είναι η λήξη)
+    expiry = matches[-1]
+
+    try:
+        return datetime.strptime(expiry, "%d/%m/%Y").date()
+    except:
+        return None

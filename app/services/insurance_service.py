@@ -2,19 +2,22 @@ from __future__ import annotations
 
 import logging
 import re
+import asyncio
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parseaddr
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.ai.client import AIClient
 from app.config import get_settings
-from app.engine.renewal_logic import process_successful_send
-from app.engine.reminder_cycle import run_reminder_cycle
-from app.engine.renewal_logic import get_upcoming_policies
+from app.engine.normalization import normalize_text
+from app.engine.renewal_logic import DEFAULT_EXPIRING_POLICIES_DAYS, get_expiring_policies, process_successful_send
 from app.models.reminder_log import ReminderLog
+from app.models.email_message import SyncedEmail
 from app.models.policy import Policy
+from app.models.client import Client
 from app.services.email_service import email_service
 
 logger = logging.getLogger(__name__)
@@ -23,6 +26,76 @@ logger = logging.getLogger(__name__)
 class InsuranceService:
     def __init__(self) -> None:
         self.settings = get_settings()
+
+    def _get_or_create_client(self, db: Session, name: str, email: str | None = None) -> Client:
+        # Try to find by email first if provided
+        if email and email != "unknown@unknown":
+            client = db.query(Client).filter(Client.email == email).first()
+            if client:
+                return client
+        
+        # Then try by name
+        client = db.query(Client).filter(Client.name == name).first()
+        if client:
+            # Update email if it was missing
+            if email and not client.email:
+                client.email = email
+            return client
+        
+        # Create new if not found
+        client = Client(name=name, email=email)
+        db.add(client)
+        db.flush()  # To get the ID
+        return client
+
+    def create_alert(
+        self,
+        db: Session,
+        *,
+        policy_holder: str,
+        contact_email: str,
+        expiry_date: date,
+        created_at: datetime,
+        source_email_id: str | None = None,
+        policy_number: str | None = None,
+        insurer: str | None = None,
+        draft_notification: str | None = None,
+    ) -> bool:
+        existing_query = db.query(Policy)
+        if source_email_id:
+            existing = existing_query.filter(Policy.source_email_id == source_email_id).first()
+        else:
+            existing = (
+                existing_query.filter(
+                    Policy.client_name == policy_holder,
+                    Policy.email == contact_email,
+                    Policy.expiry_date == expiry_date,
+                ).first()
+            )
+        if existing:
+            return False
+
+        try:
+            with db.begin_nested():
+                client = self._get_or_create_client(db, name=policy_holder, email=contact_email)
+                policy = Policy(
+                    client_id=client.id,
+                    client_name=policy_holder,
+                    email=contact_email,
+                    policy_number=policy_number,
+                    insurer=insurer,
+                    draft_notification=draft_notification,
+                    source_email_id=source_email_id,
+                    expiry_date=expiry_date,
+                    status="active",
+                )
+                policy.created_at = created_at
+                db.add(policy)
+                db.flush()
+        except IntegrityError:
+            return False
+
+        return True
 
     @staticmethod
     def _policy_to_alert(policy: Policy) -> dict[str, Any]:
@@ -33,6 +106,15 @@ class InsuranceService:
             status = "approved"
         elif policy.status == "archived":
             status = "dismissed"
+        elif policy.last_notified_at:
+            # If notified in the last 24 hours, show it as notified
+            last_notified = policy.last_notified_at
+            if last_notified.tzinfo is None:
+                last_notified = last_notified.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) - last_notified < timedelta(hours=24):
+                status = "notified"
+            else:
+                status = "pending_approval"
         else:
             status = "pending_approval"
 
@@ -46,6 +128,7 @@ class InsuranceService:
             "expiry_date": policy.expiry_date.isoformat(),
             "days_until_expiry": days_until_expiry,
             "status": status,
+            "last_notified_at": policy.last_notified_at.isoformat() if policy.last_notified_at else None,
             "draft_notification": policy.draft_notification
             or (
                 f"Αγαπητέ/ή {policy.client_name}, το ασφαλιστήριό σας λήγει στις {policy.expiry_date}. "
@@ -102,25 +185,34 @@ class InsuranceService:
         )
 
     @staticmethod
-    def _extract_date_from_text(text: str) -> date | None:
-        keyword_patterns = [
-            r"(?:λήγ(?:ει|ει στις|ει την)?|λήξη|expiry(?:\s+date)?|expires(?:\s+on)?|renewal(?:\s+date| due)?)\D{0,20}(\d{4}-\d{2}-\d{2})",
-            r"(?:λήγ(?:ει|ει στις|ει την)?|λήξη|expiry(?:\s+date)?|expires(?:\s+on)?|renewal(?:\s+date| due)?)\D{0,20}(\d{1,2}[/-]\d{1,2}[/-]\d{4})",
-        ]
-        for pattern in keyword_patterns:
-            match = re.search(pattern, text, flags=re.IGNORECASE)
-            if not match:
-                continue
-            parsed = InsuranceService._parse_loose_date(match.group(1))
-            if parsed is not None:
-                return parsed
+    def extract_expiry_date(text: str | None) -> date | None:
+        if not text:
+            return None
 
-        for candidate in re.findall(r"\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{4})\b", text):
-            parsed = InsuranceService._parse_loose_date(candidate)
-            if parsed is not None:
-                return parsed
+        text = normalize_text(text)
+        prioritized_keywords = [
+            r"(?:λήγ(?:ει|ει στις|ει την)?|λήξη|ληξη|expiry(?:\s+date)?|expires(?:\s+on)?)",
+            r"(?:renewal(?:\s+date| due)?|ανανέωση|ανανεωση|ανανέωσης|ανανεωσης)",
+        ]
+        date_patterns = [
+            r"(\d{4}-\d{2}-\d{2})",
+            r"(\d{1,2}[/-]\d{1,2}[/-]\d{4})",
+        ]
+        for keywords in prioritized_keywords:
+            for date_pattern in date_patterns:
+                pattern = rf"{keywords}\D{{0,40}}{date_pattern}"
+                match = re.search(pattern, text, flags=re.IGNORECASE)
+                if not match:
+                    continue
+                parsed = InsuranceService._parse_loose_date(match.group(1))
+                if parsed is not None:
+                    return parsed
 
         return None
+
+    @staticmethod
+    def _extract_date_from_text(text: str) -> date | None:
+        return InsuranceService.extract_expiry_date(text)
 
     @staticmethod
     def _parse_loose_date(value: str) -> date | None:
@@ -134,16 +226,111 @@ class InsuranceService:
         return None
 
     @staticmethod
-    def _extract_policy_number(text: str) -> str | None:
+    def extract_policy_number(text: str | None) -> str | None:
+        if not text:
+            return None
+
+        text = normalize_text(text)
         patterns = [
-            r"(?:policy(?:\s+number)?|policy\s*no|αρ(?:ιθμός)?\s*συμβολαίου|συμβόλαιο)\s*[:#\-]?\s*([A-ZΑ-Ω0-9][A-ZΑ-Ω0-9\-/]{3,})",
+            r"(?:policy(?:\s+number)?|policy\s*no|αρ(?:ιθμός)?\s*συμβολαίου|αριθμός\s*συμβολαίου|αριθμος\s*συμβολαιου|συμβόλαιο|συμβολαιο)\s*[:#\-]?\s*([A-ZΑ-Ω0-9\-/]*\d[A-ZΑ-Ω0-9\-/]{2,})",
             r"\b([A-Z]{1,4}-\d{3,}-[A-Z0-9]{1,6})\b",
         ]
         for pattern in patterns:
             match = re.search(pattern, text, flags=re.IGNORECASE)
             if match:
-                return match.group(1).strip()
+                return match.group(1).strip().rstrip(".,;:")
         return None
+
+    @staticmethod
+    def extract_policy_holder(text: str | None) -> str | None:
+        if not text:
+            return None
+
+        text = normalize_text(text)
+        patterns = [
+            r"(?:πελάτης|πελατης|ασφαλισμένος|ασφαλισμενος|policy\s*holder|insured)\s*:\s*([A-Za-zΑ-ΩΆ-Ώα-ωά-ώ\s]{3,})",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                return " ".join(match.group(1).split()).strip()
+        return None
+
+    @staticmethod
+    def _extract_policy_number(text: str) -> str | None:
+        return InsuranceService.extract_policy_number(text)
+
+    @staticmethod
+    def _looks_like_insurance_email(text: str) -> bool:
+        normalized = normalize_text(text).casefold()
+        strong_markers = (
+            "συμβολ",
+            "αριθμός συμβολαίου",
+            "αριθμος συμβολαιου",
+            "policy",
+            "renewal",
+            "expiry",
+            "λήξη",
+            "ληξη",
+            "λήγει",
+            "ληγει",
+            "ανανέωση",
+            "ανανεωση",
+            "ανανέω",
+            "ανανεω",
+            "έναρξη",
+            "εναρξη",
+        )
+        return any(marker in normalized for marker in strong_markers)
+
+    @staticmethod
+    def _normalize_extracted_insurance(data: dict[str, Any]) -> dict[str, Any]:
+        normalized: dict[str, Any] = {
+            "is_insurance": bool(data.get("is_insurance")),
+            "policy_holder": None,
+            "policy_number": None,
+            "insurer": None,
+            "expiry_date": None,
+            "draft_notification_greek": None,
+        }
+        for key in ("policy_holder", "policy_number", "insurer", "draft_notification_greek"):
+            value = data.get(key)
+            if isinstance(value, str):
+                cleaned = normalize_text(value)
+                normalized[key] = cleaned or None
+            elif value is not None:
+                normalized[key] = value
+
+        expiry_date = InsuranceService._parse_iso_date(data.get("expiry_date"))
+        if expiry_date is not None:
+            normalized["expiry_date"] = expiry_date.isoformat()
+
+        return normalized
+
+    @staticmethod
+    def _merge_extracted_insurance(
+        primary: dict[str, Any], secondary: dict[str, Any]
+    ) -> dict[str, Any]:
+        merged = dict(primary)
+        merged["is_insurance"] = bool(primary.get("is_insurance") or secondary.get("is_insurance"))
+        for key in ("policy_holder", "policy_number", "insurer", "expiry_date", "draft_notification_greek"):
+            if merged.get(key) in (None, "", False) and secondary.get(key) not in (None, "", False):
+                merged[key] = secondary[key]
+        return merged
+
+    @staticmethod
+    def _should_use_ai_fallback(extracted: dict[str, Any], text: str) -> bool:
+        # Critical fields needed for a complete policy record
+        has_expiry_date = bool(extracted.get("expiry_date"))
+        has_policy_number = bool(extracted.get("policy_number"))
+        has_client_name = bool(extracted.get("policy_holder"))
+
+        # If ALL critical fields exist, no need for AI
+        if has_expiry_date and has_policy_number and has_client_name:
+            return False
+
+        # Otherwise, use AI if it looks like insurance
+        return InsuranceService._looks_like_insurance_email(text)
 
     @staticmethod
     def _guess_insurer(sender_name: str, sender_email: str) -> str | None:
@@ -154,24 +341,11 @@ class InsuranceService:
         domain = sender_email.split("@")[-1].split(".")[0]
         return domain.replace("-", " ").replace("_", " ").title() if domain else None
 
-    def _fallback_extract_insurance(self, sender: str, subject: str, body: str) -> dict[str, Any]:
+    def _deterministic_extract_insurance(self, sender: str, subject: str, body: str) -> dict[str, Any]:
         sender_name, sender_email = parseaddr(sender)
-        combined = "\n".join(part for part in [subject, body] if part).strip()
-        normalized = combined.lower()
+        combined = normalize_text("\n".join(part for part in [subject, body] if part).strip())
 
-        insurance_keywords = (
-            "ασφαλισ",
-            "συμβολ",
-            "ανανέω",
-            "ανανεω",
-            "λήξη",
-            "ληγει",
-            "insurance",
-            "policy",
-            "renewal",
-            "expiry",
-        )
-        if not any(keyword in normalized for keyword in insurance_keywords):
+        if not self._looks_like_insurance_email(combined):
             return {
                 "is_insurance": False,
                 "policy_holder": None,
@@ -181,11 +355,11 @@ class InsuranceService:
                 "draft_notification_greek": None,
             }
 
-        expiry_date = self._extract_date_from_text(combined)
-        policy_number = self._extract_policy_number(combined)
-        policy_holder = sender_name or sender_email or None
+        expiry_date = self.extract_expiry_date(combined)
+        policy_number = self.extract_policy_number(combined)
+        policy_holder = self.extract_policy_holder(combined) or sender_name or sender_email or None
 
-        return {
+        return self._normalize_extracted_insurance({
             "is_insurance": expiry_date is not None or policy_number is not None,
             "policy_holder": policy_holder,
             "policy_number": policy_number,
@@ -196,127 +370,158 @@ class InsuranceService:
                 if expiry_date
                 else None
             ),
-        }
+        })
 
     async def scan_emails_for_insurance(self, db: Session, *, limit: int = 200, days: int = 90) -> dict[str, int]:
-        if not email_service.gmail_token_exists():
-            logger.info("Insurance scan: Gmail not configured, falling back to reminder cycle")
-            result = run_reminder_cycle(db_session=db, days_ahead=days)
-            return {
-                "scanned": min(result.upcoming_count + result.overdue_count, limit),
-                "alerts_created": min(len(result.eligible_for_send), limit),
-                "already_processed": result.total_skipped,
-            }
-
-        gmail_rows = email_service.fetch_gmail_emails(
-            limit=limit,
-            include_archived=False,
-            include_body=True,
+        email_rows = (
+            db.query(SyncedEmail)
+            .filter(
+                SyncedEmail.processed.is_(False),
+                SyncedEmail.status != "archived",
+            )
+            .order_by(SyncedEmail.received_at.desc(), SyncedEmail.synced_at.desc())
+            .limit(limit)
+            .all()
         )
-        if not gmail_rows:
+        if not email_rows:
+            logger.info("Insurance scan: no unprocessed synced emails found")
             return {"scanned": 0, "alerts_created": 0, "already_processed": 0}
 
-        ai_client = AIClient(self.settings)
+        ai_client: AIClient | None = None
         created_count = 0
         already_processed = 0
+        deterministic_hits = 0
+        ai_fallback_calls = 0
+        ai_fallback_hits = 0
+        skipped_non_insurance = 0
+        skipped_out_of_window = 0
         today = datetime.now(timezone.utc).date()
         latest_expiry = today + timedelta(days=days)
 
-        for row in gmail_rows:
-            sender = str(row.get("sender") or "")
-            subject = str(row.get("subject") or "")
-            body = str(row.get("body") or "")
-            extracted = await ai_client.extract_insurance_info(sender, subject, body)
-            fallback = self._fallback_extract_insurance(sender, subject, body)
+        async def mark_processed(email_id: str | None) -> bool:
+            if not email_id:
+                return True
 
-            if not extracted.get("is_insurance") and fallback.get("is_insurance"):
-                extracted = fallback
-            else:
-                for key, value in fallback.items():
-                    if extracted.get(key) in (None, "", False) and value not in (None, "", False):
-                        extracted[key] = value
+            for attempt in range(3):
+                try:
+                    db.query(SyncedEmail).filter(SyncedEmail.id == email_id).update(
+                        {SyncedEmail.processed: True},
+                        synchronize_session=False,
+                    )
+                    return True
+                except OperationalError as exc:
+                    if "database is locked" not in str(exc).lower() or attempt == 2:
+                        logger.warning("Insurance scan: failed to mark email %s as processed: %s", email_id, exc)
+                        return False
+                    await asyncio.sleep(0.2 * (attempt + 1))
+            return False
 
-            if not extracted.get("is_insurance"):
-                continue
+        async def commit_with_retry() -> None:
+            for attempt in range(3):
+                try:
+                    db.commit()
+                    return
+                except OperationalError as exc:
+                    if "database is locked" not in str(exc).lower() or attempt == 2:
+                        raise
+                    await asyncio.sleep(0.2 * (attempt + 1))
 
-            expiry_date = self._parse_iso_date(extracted.get("expiry_date"))
-            if expiry_date is None or expiry_date < today or expiry_date > latest_expiry:
-                continue
+        for row in email_rows:
+            source_email_id = str(row.gmail_id or row.id or "").strip() or None
+            try:
+                sender = str(row.sender or "")
+                subject = str(row.subject or "")
+                body = str(row.body or "")
+                combined_text = "\n".join(part for part in [subject, body] if part).strip()
+                extracted = self._deterministic_extract_insurance(sender, subject, body)
 
-            sender_name, sender_email = parseaddr(sender)
-            policy_holder = str(
-                extracted.get("policy_holder")
-                or sender_name
-                or sender_email
-                or "Άγνωστος πελάτης"
-            ).strip()
-            contact_email = sender_email or str(row.get("sender_email") or "").strip() or "unknown@unknown"
-            source_email_id = str(row.get("gmail_id") or row.get("id") or "").strip() or None
-            policy_number = str(extracted.get("policy_number") or "").strip() or None
-            insurer = str(extracted.get("insurer") or "").strip() or None
-            draft_notification = (
-                str(extracted.get("draft_notification_greek") or "").strip() or None
-            )
+                if self._should_use_ai_fallback(extracted, combined_text):
+                    if ai_client is None:
+                        ai_client = AIClient(self.settings)
+                    ai_fallback_calls += 1
+                    ai_extracted = self._normalize_extracted_insurance(
+                        await ai_client.extract_insurance_info(sender, subject, body)
+                    )
+                    extracted = self._merge_extracted_insurance(ai_extracted, extracted)
+                    if extracted.get("is_insurance"):
+                        ai_fallback_hits += 1
+                elif extracted.get("is_insurance"):
+                    deterministic_hits += 1
 
-            existing_query = db.query(Policy)
-            if source_email_id:
-                existing = existing_query.filter(Policy.source_email_id == source_email_id).first()
-            else:
-                existing = (
-                    existing_query.filter(
-                        Policy.client_name == policy_holder,
-                        Policy.email == contact_email,
-                        Policy.expiry_date == expiry_date,
-                    ).first()
+                if not extracted.get("is_insurance"):
+                    skipped_non_insurance += 1
+                    continue
+
+                expiry_date = self._parse_iso_date(extracted.get("expiry_date"))
+                if expiry_date is None or expiry_date < today or expiry_date > latest_expiry:
+                    skipped_out_of_window += 1
+                    continue
+
+                sender_name, sender_email = parseaddr(sender)
+                policy_holder = str(
+                    extracted.get("policy_holder")
+                    or sender_name
+                    or sender_email
+                    or "Άγνωστος πελάτης"
+                ).strip()
+                contact_email = sender_email or str(row.sender_email or "").strip() or "unknown@unknown"
+                policy_number = str(extracted.get("policy_number") or "").strip() or None
+                insurer = str(extracted.get("insurer") or "").strip() or None
+                draft_notification = (
+                    str(extracted.get("draft_notification_greek") or "").strip() or None
                 )
-            if existing:
-                already_processed += 1
-                continue
 
-            created_at = self._parse_received_at(row.get("received_at")) or datetime.now(timezone.utc)
-            policy = Policy(
-                client_name=policy_holder,
-                email=contact_email,
-                policy_number=policy_number,
-                insurer=insurer,
-                draft_notification=draft_notification,
-                source_email_id=source_email_id,
-                expiry_date=expiry_date,
-                status="active",
-            )
-            policy.created_at = created_at
-            db.add(policy)
-            created_count += 1
+                created_at = self._parse_received_at(row.received_at) or datetime.now(timezone.utc)
+                created = self.create_alert(
+                    db,
+                    policy_holder=policy_holder,
+                    contact_email=contact_email,
+                    expiry_date=expiry_date,
+                    created_at=created_at,
+                    source_email_id=source_email_id,
+                    policy_number=policy_number,
+                    insurer=insurer,
+                    draft_notification=draft_notification,
+                )
+                if created:
+                    created_count += 1
+                else:
+                    already_processed += 1
+            finally:
+                await mark_processed(source_email_id)
 
-        db.commit()
+        await commit_with_retry()
+        logger.info(
+            "Insurance scan summary: scanned=%s deterministic_hits=%s ai_fallback_calls=%s ai_fallback_hits=%s created=%s "
+            "already_processed=%s skipped_non_insurance=%s skipped_out_of_window=%s",
+            len(email_rows),
+            deterministic_hits,
+            ai_fallback_calls,
+            ai_fallback_hits,
+            created_count,
+            already_processed,
+            skipped_non_insurance,
+            skipped_out_of_window,
+        )
         return {
-            "scanned": len(gmail_rows),
+            "scanned": len(email_rows),
             "alerts_created": created_count,
             "already_processed": already_processed,
         }
 
-    def list_alerts(self, db: Session, *, status: str | None = None, days: int = 90) -> list[dict[str, Any]]:
-        upcoming = get_upcoming_policies(db, days=days)
-        base: list[Policy] = list(upcoming)
-        
-        # If no status is provided, or specifically 'approved'/'dismissed' is requested, 
-        # then we fetch those. Otherwise, we stick to upcoming (pending).
-        if status in ("approved", "dismissed", None):
-            approved = db.query(Policy).filter(Policy.status == "renewed").all()
-            dismissed = db.query(Policy).filter(Policy.status == "archived").all()
+    def list_alerts(
+        self,
+        db: Session,
+        *,
+        status: str | None = None,
+        days: int = DEFAULT_EXPIRING_POLICIES_DAYS,
+    ) -> list[dict[str, Any]]:
+        alerts = [self._policy_to_alert(policy) for policy in get_expiring_policies(db, days=days)]
 
-            seen_ids = {policy.id for policy in base}
-            for policy in approved + dismissed:
-                if policy.id not in seen_ids:
-                    base.append(policy)
-
-        alerts = [self._policy_to_alert(policy) for policy in base]
-        
-        # Final strict filtering based on the computed alert status
         if status:
             alerts = [alert for alert in alerts if alert["status"] == status]
         else:
-            # Default behavior: if no status requested, only show what's NOT already dealt with
+            # ONLY show pending alerts. Once notified, they "leave" this list.
             alerts = [alert for alert in alerts if alert["status"] == "pending_approval"]
 
         alerts.sort(key=lambda alert: alert.get("days_until_expiry") if alert.get("days_until_expiry") is not None else 99999)
@@ -374,11 +579,22 @@ class InsuranceService:
             )
             db.commit()
             raise ValueError(str(result.get("error") or "Notification send failed"))
-
         process_successful_send(policy)
-        # Ensure the status is set to something that will filter it out of pending_approval
-        if policy.status == "active":
-            policy.status = "reminder_sent"
+        policy.last_notified_at = datetime.now(timezone.utc)
+
+        # Log to History (ActivityLog) using the correct service
+        from app.services.activity_service import log_action
+        log_action(
+            action_type="Ειδοποίηση Λήξης",
+            client_name=policy.client_name,
+            policy_number=policy.policy_number,
+            channel="email",
+            status="success",
+            db=db
+        )
+
+        # Update status so it leaves the "pending_approval" view
+        policy.status = "notified"
             
         db.add(ReminderLog(policy_id=policy.id, status="sent", error_message=None))
         db.commit()
@@ -386,7 +602,7 @@ class InsuranceService:
         return {
             "alert_id": str(policy_id),
             "new_status": policy.status,
-            "message": "Notification sent",
+            "message": "Notification sent and moved to history",
             "email": policy.email,
             "provider": result.get("provider"),
         }

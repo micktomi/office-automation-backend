@@ -10,15 +10,19 @@ class EmailRecord(BaseModel):
     subject: str
     sender: str
     body: str
+    classification: str = "probable"
+    classification_label: str = "Πελάτης"
     priority: str = "medium"
     status: str = "inbox"
     unread: bool = True
+    processed: bool = False
     received_at: str | None = None
 
 
 class EmailSyncResult(BaseModel):
     processed: int
     skipped: int
+    status: str = "ok"
 
 
 class EmailReplyRequest(BaseModel):

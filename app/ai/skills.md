@@ -7,7 +7,7 @@ The AI Orchestrator can trigger the following deterministic skills, exported by 
 | `sync_inbox`            | `email.sync`    | None | Scans Gmail for new important emails and analyzes them. |
 | `list_emails`           | `email.list`    | None | Returns a list of the latest emails from the database. |
 | `generate_reply`        | `email.reply`   | `email_id` | Drafts a friendly response for a specific email. |
-| `list_insurance_alerts` | `insurance.alerts` | `status` (optional) | Gets all upcoming insurance policy renewals. |
+| `list_insurance_alerts` | `insurance.alerts` | `status` (optional), `days` (optional) | Gets upcoming insurance policy renewals within the shared window. |
 | `scan_insurance`        | `insurance.scan`| None | Processes recently synced emails to find missing insurance renewals. |
 | `list_tasks`            | `tasks.list`    | None | Lists outstanding todo tasks. |
 | `create_task`           | `tasks.create`  | `title` | Creates a new task. |

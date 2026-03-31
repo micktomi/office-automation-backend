@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -14,6 +15,115 @@ logger = logging.getLogger(__name__)
 # Initialize a global AI client instance
 settings = get_settings()
 ai_client = AIClient(settings)
+
+
+def _to_jsonable(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if isinstance(value, dict):
+        return {key: _to_jsonable(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_to_jsonable(item) for item in value]
+    if isinstance(value, tuple):
+        return [_to_jsonable(item) for item in value]
+    return value
+
+
+def _first_string(*values: Any) -> str | None:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _build_tool_payload(
+    action: str,
+    message: str,
+    context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"message": message}
+    if context:
+        payload.update(context)
+
+    if action == "tasks.create":
+        payload.setdefault("title", message.strip())
+    elif action == "calendar.create":
+        payload.setdefault("summary", message.strip())
+    elif action == "email.reply":
+        email_id = _first_string(
+            payload.get("email_id"),
+            payload.get("id"),
+            payload.get("selectedEmailId"),
+        )
+        if email_id:
+            payload["email_id"] = email_id
+    elif action == "tasks.complete":
+        task_id = _first_string(
+            payload.get("task_id"),
+            payload.get("id"),
+            payload.get("selectedTaskId"),
+        )
+        if task_id:
+            payload["task_id"] = task_id
+    elif action == "calendar.delete":
+        event_id = _first_string(
+            payload.get("event_id"),
+            payload.get("id"),
+            payload.get("selectedCalendarEventId"),
+            payload.get("selectedEventId"),
+        )
+        if event_id:
+            payload["event_id"] = event_id
+    elif action in {"insurance.approve", "insurance.dismiss", "insurance.notify"}:
+        alert_id = _first_string(
+            payload.get("alert_id"),
+            payload.get("policy_id"),
+            payload.get("id"),
+            payload.get("selectedPolicyId"),
+        )
+        if alert_id:
+            payload["alert_id"] = alert_id
+
+    return payload
+
+
+def _format_tool_response(action: str, data: Any) -> str:
+    if data is None:
+        return "Η ενέργεια ολοκληρώθηκε."
+
+    if isinstance(data, str):
+        text = data.strip()
+        return text or "Η ενέργεια ολοκληρώθηκε."
+
+    if isinstance(data, dict):
+        message = _first_string(data.get("message"), data.get("detail"), data.get("summary"))
+        if message:
+            return message
+
+        if action == "email.list" and isinstance(data.get("items"), list):
+            return f"Βρέθηκαν {len(data['items'])} email."
+
+        if action == "calendar.list" and isinstance(data.get("items"), list):
+            return f"Βρέθηκαν {len(data['items'])} ραντεβού."
+
+        if action == "tasks.list" and isinstance(data.get("items"), list):
+            return f"Βρέθηκαν {len(data['items'])} tasks."
+
+        if "count" in data and isinstance(data["count"], (int, float)):
+            return f"Βρέθηκαν {data['count']} αποτελέσματα."
+
+        return json.dumps(data, ensure_ascii=False)
+
+    if isinstance(data, list):
+        if action == "email.list":
+            return f"Βρέθηκαν {len(data)} email."
+        if action == "calendar.list":
+            return f"Βρέθηκαν {len(data)} ραντεβού."
+        if action == "tasks.list":
+            return f"Βρέθηκαν {len(data)} tasks."
+        return f"Βρέθηκαν {len(data)} αποτελέσματα."
+
+    return str(data)
 
 
 def _build_routing_context(context: dict[str, Any] | None) -> str | None:
@@ -68,15 +178,18 @@ async def handle_chat_message(
     1. Uses AIClient to detect intent.
     2. Maps action string to a deterministic skill.
     3. Calls the Tool Layer (app.ai.tools) to execute.
-    4. Returns a natural language response, the action, and data.
+    4. Builds the final response from tool data only.
     """
     logger.info("Orchestrator predicting intent for: '%s'", message)
-    
+
     routing_context = _build_routing_context(context)
     intent_result = await ai_client.route_intent(message, routing_context)
     action = intent_result.get("action", "chat")
-    natural_response = intent_result.get("response", "Εντάξει.")
-    
+    if not isinstance(action, str) or not action.strip():
+        action = "chat"
+    else:
+        action = action.strip()
+
     # Action mapping between AI prompt names and tool actions
     action_map = {
         "list_emails": "email.list",
@@ -96,48 +209,29 @@ async def handle_chat_message(
         "complete_task": "tasks.complete",
         "help": "chat",
     }
-    
+
     mapped_action = action_map.get(action, action)
-    
-    # If it's just a chat, return AI response
+
+    # Chat stays AI-driven. Every other action is tool-driven first.
     if mapped_action == "chat":
         chat_reply = await ai_client.chat_response(message)
         return chat_reply, "chat", None
-        
-    try:
-        # Call the Tool Layer Bridge
-        # We pass the full user message as a fallback payload
-        payload: dict[str, Any] = {"message": message}
-        if context:
-            payload.update(context)
-        
-        # Skill extraction
-        if mapped_action == "calendar.create":
-            event_data = await ai_client.extract_event_info(message)
-            if event_data.get("confidence") != "low":
-                payload.update(event_data)
-                if "start_time" in event_data:
-                    payload["start"] = event_data["start_time"]
-                if "end_time" in event_data:
-                    payload["end"] = event_data["end_time"]
-        elif mapped_action == "calendar.delete":
-            # If no ID is found, use the one from the context if available
-            if not payload.get("id") and context:
-                payload["id"] = context.get("selectedPolicyId") or context.get("selectedEmailId")
-        elif mapped_action == "tasks.create":
-            payload["title"] = message
 
+    try:
+        payload = _build_tool_payload(mapped_action, message, context)
         result = await call_tool(mapped_action, payload, db)
-        
+
         if result["status"] == "success":
-            return natural_response, mapped_action, result["data"]
-        else:
-            # If tool failed, let AI explain why
-            error_msg = result.get("message", "Άγνωστο σφάλμα")
-            chat_reply = await ai_client.chat_response(message, action_result=f"Σφάλμα: {error_msg}")
-            return chat_reply, mapped_action, None
-            
+            data = _to_jsonable(result.get("data"))
+            response_text = _format_tool_response(mapped_action, data)
+            return response_text, mapped_action, data
+
+        # If the tool fails, AI may only explain the error.
+        error_msg = result.get("message", "Άγνωστο σφάλμα")
+        chat_reply = await ai_client.chat_response(message, action_result=f"Σφάλμα: {error_msg}")
+        return chat_reply, mapped_action, None
+
     except Exception as e:
         logger.error("Orchestrator Error: %s", e)
         error_reply = await ai_client.chat_response(message, action_result=f"Η ενέργεια απέτυχε: {e}")
-        return error_reply, None, None
+        return error_reply, mapped_action, None
