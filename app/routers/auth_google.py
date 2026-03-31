@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from urllib.parse import quote_plus
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 
 from app.config import get_settings
@@ -17,10 +17,21 @@ router = APIRouter(prefix="/auth/google", tags=["auth_google"])
 logger = logging.getLogger(__name__)
 
 
+def _build_redirect_uri(request: Request) -> str:
+    settings = get_settings()
+    if settings.google_redirect_uri and settings.google_redirect_uri != "http://127.0.0.1:3001/auth/google/callback":
+        return settings.google_redirect_uri
+
+    scheme = request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0].strip()
+    host = request.headers.get("x-forwarded-host", request.headers.get("host", request.url.netloc))
+    path = request.app.url_path_for("google_callback")
+    return f"{scheme}://{host}{path}"
+
+
 @router.get("/start")
-def google_start():
+def google_start(request: Request):
     try:
-        flow = get_google_flow()
+        flow = get_google_flow(redirect_uri=_build_redirect_uri(request))
         auth_url, state = flow.authorization_url(
             prompt="select_account consent",
             access_type="offline",
@@ -39,12 +50,16 @@ def google_start():
 
 
 @router.get("/login")
-def google_login_alias():
-    return google_start()
+def google_login_alias(request: Request):
+    return google_start(request)
 
 
 @router.get("/callback")
-def google_callback(code: str | None = Query(default=None), state: str | None = Query(default=None)):
+def google_callback(
+    request: Request,
+    code: str | None = Query(default=None),
+    state: str | None = Query(default=None),
+):
     if not code:
         # Returning 400 instead of 422 for scanners and missing params
         raise HTTPException(status_code=400, detail="Missing OAuth code parameter.")
@@ -52,7 +67,7 @@ def google_callback(code: str | None = Query(default=None), state: str | None = 
     settings = get_settings()
 
     try:
-        flow = get_google_flow(state=state)
+        flow = get_google_flow(state=state, redirect_uri=_build_redirect_uri(request))
         code_verifier = oauth_state_store.pop(state)
         if code_verifier:
             flow.code_verifier = code_verifier

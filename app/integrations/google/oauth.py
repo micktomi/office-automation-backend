@@ -9,7 +9,7 @@ from google_auth_oauthlib.flow import Flow
 from app.config import get_settings
 
 
-def get_google_flow(state: str | None = None) -> Flow:
+def get_google_flow(state: str | None = None, redirect_uri: str | None = None) -> Flow:
     settings = get_settings()
     scopes = list(settings.google_scopes)
 
@@ -28,5 +28,5 @@ def get_google_flow(state: str | None = None) -> Flow:
             state=state,
         )
 
-    flow.redirect_uri = settings.google_redirect_uri
+    flow.redirect_uri = redirect_uri or settings.google_redirect_uri
     return flow
