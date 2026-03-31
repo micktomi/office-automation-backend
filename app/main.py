@@ -36,9 +36,9 @@ async def lifespan(app: FastAPI):
     os.makedirs("/app/data", exist_ok=True)
 
     # Import models to ensure they are registered
-    from app.models import activity_log, client, email_message, policy, reminder_log
+    from app.models import user, activity_log, client, email_message, policy, reminder_log
 
-    # This creates all tables (clients, policies, reminders, activity_log) 
+    # This creates all tables (users, clients, policies, reminders, activity_log) 
     # if they don't exist in office_agent.db
     Base.metadata.create_all(bind=engine)
     

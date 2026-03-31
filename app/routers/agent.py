@@ -32,8 +32,9 @@ def _as_dict(value: Any) -> Any:
     return value
 
 
-async def execute_action(action: str, payload: dict[str, Any], db: Session) -> ActionResponse:
-    result = await call_tool(action, payload, db)
+async def execute_action(action: str, payload: dict[str, Any] | None, db: Session) -> ActionResponse:
+    safe_payload = payload or {}
+    result = await call_tool(action, safe_payload, db)
     if result["status"] != "success":
         message = result.get("message", "Action failed")
         status_code = 400 if "not supported" in message else 422

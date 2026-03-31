@@ -55,6 +55,17 @@ class Settings:
     google_scopes: tuple[str, ...]
     google_redirect_uri: str
     gemini_api_key: str | None
+    gemini_model: str
+
+    @property
+    def get_token_path(self, user_email: str | None = None) -> str:
+        if not user_email:
+            return self.google_token_file
+        
+        # Create user-specific token file in secrets/tokens/
+        token_dir = Path(self.google_token_file).parent / "tokens"
+        token_dir.mkdir(parents=True, exist_ok=True)
+        return str(token_dir / f"token_{user_email}.json")
 
     @property
     def cors_origins_list(self) -> list[str]:
@@ -108,11 +119,16 @@ def get_settings() -> Settings:
         google_token_file=str((backend_root / os.getenv("GOOGLE_TOKEN_FILE", "token.json")).resolve()),
         google_scopes=(
             "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.send",
             "https://www.googleapis.com/auth/calendar",
             "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.profile",
+            "openid",
         ),
         google_redirect_uri=os.getenv("GOOGLE_REDIRECT_URI", "http://127.0.0.1:3001/auth/google/callback").strip(),
         gemini_api_key=os.getenv("GEMINI_API_KEY"),
+        gemini_model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
     )
 
 

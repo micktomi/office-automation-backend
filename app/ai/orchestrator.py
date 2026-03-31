@@ -126,9 +126,13 @@ def _format_tool_response(action: str, data: Any) -> str:
     return str(data)
 
 
-def _build_routing_context(context: dict[str, Any] | None) -> str | None:
+def _build_routing_context(context: dict[str, Any] | None, db: Session) -> str | None:
     if not context:
         return None
+
+    from app.models.email_message import SyncedEmail
+    from app.models.policy import Policy
+    from app.services.task_service import task_service
 
     parts: list[str] = []
 
@@ -136,36 +140,51 @@ def _build_routing_context(context: dict[str, Any] | None) -> str | None:
     if isinstance(current_tab, str) and current_tab.strip():
         parts.append(f"Current UI tab: {current_tab}")
 
-    last_action = context.get("lastActionPerformed")
-    if isinstance(last_action, str) and last_action.strip():
-        parts.append(f"Last completed action: {last_action}")
+    selected_email_id = context.get("selectedEmailId")
+    if selected_email_id:
+        email = db.query(SyncedEmail).filter(SyncedEmail.id == selected_email_id).first()
+        if email:
+            parts.append(f"Επιλεγμένο email (περιεχόμενο): Από {email.sender}, Θέμα '{email.subject}', Κείμενο: {email.body[:300]}")
 
-    recent_messages = context.get("recentMessages")
-    if isinstance(recent_messages, list) and recent_messages:
-        rendered_messages: list[str] = []
-        for item in recent_messages[-6:]:
-            if not isinstance(item, dict):
-                continue
-            role = item.get("role")
-            content = item.get("content")
-            if isinstance(role, str) and isinstance(content, str) and content.strip():
-                rendered_messages.append(f"{role}: {content.strip()}")
-        if rendered_messages:
-            parts.append("Recent conversation:\n" + "\n".join(rendered_messages))
+    selected_policy_id = context.get("selectedPolicyId")
+    if selected_policy_id:
+        policy = db.query(Policy).filter(Policy.id == selected_policy_id).first()
+        if policy:
+            parts.append(f"Επιλεγμένο συμβόλαιο: Πελάτης {policy.client_name}, Λήξη {policy.expiry_date}, Ποσό/Αριθμός {policy.policy_number}")
 
-    selected_email = context.get("selectedEmailId")
-    if isinstance(selected_email, str) and selected_email.strip():
-        parts.append(f"Selected email id: {selected_email}")
-
-    selected_policy = context.get("selectedPolicyId")
-    if isinstance(selected_policy, str) and selected_policy.strip():
-        parts.append(f"Selected policy id: {selected_policy}")
-
-    selected_client = context.get("selectedClientId")
-    if isinstance(selected_client, str) and selected_client.strip():
-        parts.append(f"Selected client id: {selected_client}")
+    selected_task_id = context.get("selectedTaskId")
+    if selected_task_id:
+        try:
+            task = task_service.get_task(selected_task_id)
+            if task:
+                parts.append(f"Επιλεγμένη εργασία: {task.title}, Προτεραιότητα {task.priority}")
+        except: pass
 
     return "\n".join(parts) if parts else None
+
+
+def _get_data_context(db: Session) -> str:
+    """Fetch recent data to provide context to the AI."""
+    from app.models.email_message import SyncedEmail
+    from app.services.task_service import task_service
+
+    parts = []
+    
+    # Recent Emails
+    emails = db.query(SyncedEmail).order_by(SyncedEmail.received_at.desc()).limit(3).all()
+    if emails:
+        parts.append("ΤΕΛΕΥΤΑΙΑ EMAILS:")
+        for e in emails:
+            parts.append(f"- Από: {e.sender}, Θέμα: {e.subject}, Περίληψη: {e.body[:100]}...")
+
+    # Recent Tasks
+    tasks = task_service.list_tasks(limit=5)
+    if tasks:
+        parts.append("\nΤΡΕΧΟΝΤΑ TASKS:")
+        for t in tasks:
+            parts.append(f"- {t.title} ({t.priority}) - status: {'completed' if t.completed else 'pending'}")
+
+    return "\n".join(parts)
 
 
 async def handle_chat_message(
@@ -182,7 +201,7 @@ async def handle_chat_message(
     """
     logger.info("Orchestrator predicting intent for: '%s'", message)
 
-    routing_context = _build_routing_context(context)
+    routing_context = _build_routing_context(context, db)
     intent_result = await ai_client.route_intent(message, routing_context)
     action = intent_result.get("action", "chat")
     if not isinstance(action, str) or not action.strip():
@@ -214,7 +233,8 @@ async def handle_chat_message(
 
     # Chat stays AI-driven. Every other action is tool-driven first.
     if mapped_action == "chat":
-        chat_reply = await ai_client.chat_response(message)
+        data_context = _get_data_context(db)
+        chat_reply = await ai_client.chat_response(message, context_data=data_context)
         return chat_reply, "chat", None
 
     try:
@@ -228,10 +248,10 @@ async def handle_chat_message(
 
         # If the tool fails, AI may only explain the error.
         error_msg = result.get("message", "Άγνωστο σφάλμα")
-        chat_reply = await ai_client.chat_response(message, action_result=f"Σφάλμα: {error_msg}")
+        chat_reply = await ai_client.chat_response(message, action_result=f"Σφάλμα: {error_msg}", context_data=_get_data_context(db))
         return chat_reply, mapped_action, None
 
     except Exception as e:
         logger.error("Orchestrator Error: %s", e)
-        error_reply = await ai_client.chat_response(message, action_result=f"Η ενέργεια απέτυχε: {e}")
+        error_reply = await ai_client.chat_response(message, action_result=f"Η ενέργεια απέτυχε: {e}", context_data=_get_data_context(db))
         return error_reply, mapped_action, None

@@ -100,11 +100,11 @@ def google_login_alias(request: Request):
 @router.get("/callback")
 def google_callback(
     request: Request,
+    db: Session = Depends(get_db),
     code: str | None = Query(default=None),
     state: str | None = Query(default=None),
 ):
     if not code:
-        # Returning 400 instead of 422 for scanners and missing params
         raise HTTPException(status_code=400, detail="Missing OAuth code parameter.")
 
     settings = get_settings()
@@ -114,25 +114,50 @@ def google_callback(
         code_verifier = request.cookies.get("google_code_verifier") or oauth_state_store.pop(state)
         if code_verifier:
             flow.code_verifier = code_verifier
-        else:
-            logger.warning("OAuth code verifier missing for state=%s. Proceeding without PKCE verifier.", state)
-        # Google may return a superset of already-granted scopes for the same client.
-        # Accept that scope set instead of failing callback with scope mismatch.
+        
         os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
         flow.fetch_token(code=code)
+        credentials = flow.credentials
 
-        token_path = Path(settings.google_token_file)
+        # Fetch user info from Google
+        service = build("oauth2", "v2", credentials=credentials)
+        user_info = service.userinfo().get().execute()
+        email = user_info.get("email")
+        google_id = user_info.get("id")
+        name = user_info.get("name")
+        picture = user_info.get("picture")
+
+        if not email:
+            raise HTTPException(status_code=400, detail="Could not retrieve email from Google.")
+
+        # Update or Create User in DB
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            user = User(email=email, google_id=google_id, name=name, picture=picture)
+            db.add(user)
+        else:
+            user.last_login = datetime.now(timezone.utc)
+            if name: user.name = name
+            if picture: user.picture = picture
+        
+        db.commit()
+        db.refresh(user)
+
+        # Save dynamic token path based on user email
+        token_path = Path(settings.get_token_path(email))
         token_path.parent.mkdir(parents=True, exist_ok=True)
-        token_path.write_text(flow.credentials.to_json(), encoding="utf-8")
+        token_path.write_text(credentials.to_json(), encoding="utf-8")
 
-        token = "test-session"
-        print("SETTING COOKIE session =", token)
+        # Also keep a symlink/copy as default 'token.json' for single-user compatibility
+        default_token = Path(settings.google_token_file)
+        default_token.write_text(credentials.to_json(), encoding="utf-8")
+
         response = RedirectResponse(
-            url=f"{settings.frontend_url}?google=connected"
+            url=f"{settings.frontend_url}?google=connected&email={quote_plus(email)}"
         )
         response.set_cookie(
             key="session",
-            value=token,
+            value=f"user_{user.id}", # Real user session ID
             httponly=True,
             secure=True,
             samesite="none",

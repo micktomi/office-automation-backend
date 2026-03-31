@@ -23,7 +23,7 @@ class AIClient:
         self._settings = settings
         if settings.gemini_api_key:
             self._client = genai.Client(api_key=settings.gemini_api_key)
-            self._model_name = "gemini-3.1-flash-lite-preview"
+            self._model_name = settings.gemini_model
         else:
             self._client = None
             logger.warning("Gemini API key not found. AI features disabled.")
@@ -94,28 +94,25 @@ class AIClient:
             logger.error("[INTENT_ROUTER] Failed: %s", e)
             return fallback
 
-    async def chat_response(self, user_message: str, action_result: str | None = None) -> str:
+    async def chat_response(self, user_message: str, action_result: str | None = None, context_data: str | None = None) -> str:
         """Fallback chat when no specific tool is called or to explain an error."""
         if not self._client:
             return "Δεν υπάρχει εγκατεστημένο AI για συνομιλία."
 
         prompt = (
             "Είσαι ο Geminako (Γεμινάκος), ο έξυπνος βοηθός ενός ασφαλιστικού γραφείου. "
-            "Είσαι φιλικός, άμεσος και εξυπηρετικός. Χρησιμοποιείς φυσικό λόγο, όχι ρομποτικό. "
-            "Μπορείς να εκτελέσεις συγκεκριμένες ενέργειες: "
-            "1. Να δεις τα email του χρήστη και να συγχρονίσεις το inbox.\n"
-            "2. Να φτιάξεις draft απαντήσεις σε email.\n"
-            "3. Να σκανάρεις τα email για να βρεις συμβόλαια που λήγουν.\n"
-            "4. Να δείξεις τις ειδοποιήσεις για ασφάλειες που λήγουν σύντομα.\n"
-            "5. Να στείλεις μαζικά SMS υπενθύμισης για λήξεις.\n"
-            "6. Να γράψεις, να ολοκληρώσεις και να δείξεις λίστες με tasks/εργασίες.\n"
-            "7. Να δεις το ημερολόγιο (Calendar) και να προσθέσεις/διαγράψεις ραντεβού.\n"
-            "8. Να στείλεις μηνύματα στο κινητό μέσω WhatsApp.\n\n"
-            f"Ο χρήστης σου είπε: '{user_message}'.\n"
+            "Είσαι φιλικός, άμεσος και εξυπηρετικός. Χρησιμοποιείς φυσικό λόγο, όχι ρομποτικό.\n\n"
         )
+        
+        if context_data:
+            prompt += f"--- ΔΕΔΟΜΕΝΑ ΓΡΑΦΕΙΟΥ ---\n{context_data}\n----------------------\n\n"
+
+        prompt += f"Ο χρήστης σου είπε: '{user_message}'.\n"
+        
         if action_result:
             prompt += f"Επιπλέον, το σύστημα μόλις εκτέλεσε ενέργεια στο παρασκήνιο με αποτέλεσμα: '{action_result}'.\n"
-        prompt += "Απάντησε στο χρήστη σύντομα (1-2 προτάσεις), φυσικά και φιλικά στα ελληνικά. Αν ζητάει κάτι άσχετο με τις δυνατότητές σου, καθοδήγησέ τον σε αυτές που έχεις."
+        
+        prompt += "Απάντησε στο χρήστη σύντομα (1-2 προτάσεις), φυσικά και φιλικά στα ελληνικά."
 
         try:
             return await self._generate_content(prompt, temperature=0.7)
