@@ -8,23 +8,28 @@ from google_auth_oauthlib.flow import Flow
 
 from app.config import get_settings
 
+SCOPES = (
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+)
+
 
 def get_google_flow(state: str | None = None, redirect_uri: str | None = None) -> Flow:
     settings = get_settings()
-    scopes = list(settings.google_scopes)
 
     credentials_json_b64 = os.getenv("GOOGLE_CREDENTIALS_JSON")
     if credentials_json_b64:
         client_config = json.loads(base64.b64decode(credentials_json_b64))
         flow = Flow.from_client_config(
             client_config,
-            scopes=scopes,
+            scopes=SCOPES,
             state=state,
         )
     else:
         flow = Flow.from_client_secrets_file(
             settings.google_credentials_file,
-            scopes=scopes,
+            scopes=SCOPES,
             state=state,
         )
 
