@@ -111,7 +111,7 @@ def get_settings() -> Settings:
             "https://www.googleapis.com/auth/calendar",
             "https://www.googleapis.com/auth/drive",
         ),
-        google_redirect_uri=os.getenv("GOOGLE_REDIRECT_URI", "http://127.0.0.1:3001/auth/google/callback"),
+        google_redirect_uri=os.getenv("GOOGLE_REDIRECT_URI", "http://127.0.0.1:3001/auth/google/callback").strip(),
         gemini_api_key=os.getenv("GEMINI_API_KEY"),
     )
 
