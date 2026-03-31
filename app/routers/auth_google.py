@@ -24,11 +24,14 @@ def _build_redirect_uri(request: Request) -> str:
 @router.get("/start")
 def google_start(request: Request):
     try:
-        flow = get_google_flow(redirect_uri=_build_redirect_uri(request))
+        redirect_uri = _build_redirect_uri(request)
+        print("REDIRECT_URI =", redirect_uri, flush=True)
+        flow = get_google_flow(redirect_uri=redirect_uri)
         auth_url, state = flow.authorization_url(
             prompt="select_account consent",
             access_type="offline",
         )
+        print("AUTH_URL =", auth_url, flush=True)
 
         code_verifier = getattr(flow, "code_verifier", None)
         if state and code_verifier:
@@ -46,11 +49,14 @@ def google_start(request: Request):
 @router.get("/login")
 def google_login_alias(request: Request):
     try:
-        flow = get_google_flow(redirect_uri=_build_redirect_uri(request))
+        redirect_uri = _build_redirect_uri(request)
+        print("REDIRECT_URI =", redirect_uri, flush=True)
+        flow = get_google_flow(redirect_uri=redirect_uri)
         auth_url, state = flow.authorization_url(
             prompt="select_account consent",
             access_type="offline",
         )
+        print("AUTH_URL =", auth_url, flush=True)
 
         code_verifier = getattr(flow, "code_verifier", None)
         if state and code_verifier:
