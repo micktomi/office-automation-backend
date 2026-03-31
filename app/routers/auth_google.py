@@ -21,20 +21,29 @@ def _build_redirect_uri(request: Request) -> str:
     return get_settings().google_redirect_uri
 
 
+def _get_code_verifier(flow) -> str | None:
+    code_verifier = getattr(flow, "code_verifier", None)
+    if code_verifier:
+        return code_verifier
+
+    oauth2session = getattr(flow, "oauth2session", None)
+    client = getattr(oauth2session, "_client", None)
+    return getattr(client, "code_verifier", None)
+
+
 @router.get("/start")
 def google_start(request: Request):
     try:
         redirect_uri = _build_redirect_uri(request)
         print("REDIRECT_URI =", redirect_uri, flush=True)
-        flow = get_google_flow(redirect_uri=redirect_uri)
-        flow.autogenerate_code_verifier = True
+        flow = get_google_flow(redirect_uri=redirect_uri, autogenerate_code_verifier=True)
         auth_url, state = flow.authorization_url(
             prompt="select_account consent",
             access_type="offline",
         )
         print("AUTH_URL =", auth_url, flush=True)
 
-        code_verifier = getattr(flow, "code_verifier", None)
+        code_verifier = _get_code_verifier(flow)
         if state and code_verifier:
             oauth_state_store.put(state, code_verifier)
 
@@ -52,15 +61,14 @@ def google_login_alias(request: Request):
     try:
         redirect_uri = _build_redirect_uri(request)
         print("REDIRECT_URI =", redirect_uri, flush=True)
-        flow = get_google_flow(redirect_uri=redirect_uri)
-        flow.autogenerate_code_verifier = True
+        flow = get_google_flow(redirect_uri=redirect_uri, autogenerate_code_verifier=True)
         auth_url, state = flow.authorization_url(
             prompt="select_account consent",
             access_type="offline",
         )
         print("AUTH_URL =", auth_url, flush=True)
 
-        code_verifier = getattr(flow, "code_verifier", None)
+        code_verifier = _get_code_verifier(flow)
         if state and code_verifier:
             oauth_state_store.put(state, code_verifier)
 

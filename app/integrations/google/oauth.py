@@ -15,7 +15,11 @@ SCOPES = (
 )
 
 
-def get_google_flow(state: str | None = None, redirect_uri: str | None = None) -> Flow:
+def get_google_flow(
+    state: str | None = None,
+    redirect_uri: str | None = None,
+    autogenerate_code_verifier: bool = False,
+) -> Flow:
     settings = get_settings()
 
     credentials_json_b64 = os.getenv("GOOGLE_CREDENTIALS_JSON")
@@ -25,12 +29,14 @@ def get_google_flow(state: str | None = None, redirect_uri: str | None = None) -
             client_config,
             scopes=SCOPES,
             state=state,
+            autogenerate_code_verifier=autogenerate_code_verifier,
         )
     else:
         flow = Flow.from_client_secrets_file(
             settings.google_credentials_file,
             scopes=SCOPES,
             state=state,
+            autogenerate_code_verifier=autogenerate_code_verifier,
         )
 
     flow.redirect_uri = redirect_uri or settings.google_redirect_uri
