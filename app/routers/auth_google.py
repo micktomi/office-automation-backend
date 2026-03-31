@@ -27,6 +27,7 @@ def google_start(request: Request):
         redirect_uri = _build_redirect_uri(request)
         print("REDIRECT_URI =", redirect_uri, flush=True)
         flow = get_google_flow(redirect_uri=redirect_uri)
+        flow.autogenerate_code_verifier = True
         auth_url, state = flow.authorization_url(
             prompt="select_account consent",
             access_type="offline",
@@ -52,6 +53,7 @@ def google_login_alias(request: Request):
         redirect_uri = _build_redirect_uri(request)
         print("REDIRECT_URI =", redirect_uri, flush=True)
         flow = get_google_flow(redirect_uri=redirect_uri)
+        flow.autogenerate_code_verifier = True
         auth_url, state = flow.authorization_url(
             prompt="select_account consent",
             access_type="offline",
