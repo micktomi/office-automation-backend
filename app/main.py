@@ -76,11 +76,15 @@ def create_app() -> FastAPI:
         description="Deterministic backend for insurance office automation",
     )
 
-    allow_origins = settings.cors_origins_list or ["*"]
+    allow_origins = settings.cors_origins_list
+    if not allow_origins:
+        allow_origins = ["*"]
+        
     allow_all_origins = "*" in allow_origins
+    
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"] if allow_all_origins else allow_origins,
+        allow_origins=allow_origins,
         allow_origin_regex=settings.cors_origin_regex,
         allow_credentials=not allow_all_origins,
         allow_methods=["*"],

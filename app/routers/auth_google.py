@@ -49,9 +49,24 @@ def google_start(request: Request):
         ) from exc
 
 
+@router.get("/")
 @router.get("/login")
 def google_login_alias(request: Request):
-    return google_start(request)
+    try:
+        flow = get_google_flow(redirect_uri=_build_redirect_uri(request))
+        auth_url, state = flow.authorization_url(
+            prompt="select_account consent",
+            access_type="offline",
+        )
+
+        code_verifier = getattr(flow, "code_verifier", None)
+        if state and code_verifier:
+            oauth_state_store.put(state, code_verifier)
+
+        return RedirectResponse(url=auth_url)
+    except Exception as exc:
+        logger.exception("Google login redirect failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.get("/callback")
