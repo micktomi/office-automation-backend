@@ -7,7 +7,7 @@ from pathlib import Path
 from urllib.parse import quote_plus
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from app.config import get_settings
 from app.integrations.google.oauth import get_google_flow
@@ -31,6 +31,17 @@ def _get_code_verifier(flow) -> str | None:
     return getattr(client, "code_verifier", None)
 
 
+def _set_code_verifier_cookie(response, code_verifier: str) -> None:
+    response.set_cookie(
+        key="google_code_verifier",
+        value=code_verifier,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        path="/",
+    )
+
+
 @router.get("/start")
 def google_start(request: Request):
     try:
@@ -47,7 +58,11 @@ def google_start(request: Request):
         if state and code_verifier:
             oauth_state_store.put(state, code_verifier)
 
-        return {"auth_url": auth_url}
+        response = JSONResponse({"auth_url": auth_url})
+        if code_verifier:
+            _set_code_verifier_cookie(response, code_verifier)
+
+        return response
     except FileNotFoundError as exc:
         raise HTTPException(
             status_code=500,
@@ -72,7 +87,11 @@ def google_login_alias(request: Request):
         if state and code_verifier:
             oauth_state_store.put(state, code_verifier)
 
-        return RedirectResponse(url=auth_url)
+        response = RedirectResponse(url=auth_url)
+        if code_verifier:
+            _set_code_verifier_cookie(response, code_verifier)
+
+        return response
     except Exception as exc:
         logger.exception("Google login redirect failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
@@ -92,7 +111,7 @@ def google_callback(
 
     try:
         flow = get_google_flow(state=state, redirect_uri=_build_redirect_uri(request))
-        code_verifier = oauth_state_store.pop(state)
+        code_verifier = request.cookies.get("google_code_verifier") or oauth_state_store.pop(state)
         if code_verifier:
             flow.code_verifier = code_verifier
         else:
@@ -119,6 +138,7 @@ def google_callback(
             samesite="none",
             path="/"
         )
+        response.delete_cookie(key="google_code_verifier", path="/")
 
         return response
     except HTTPException:
