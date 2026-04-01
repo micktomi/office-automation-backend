@@ -16,7 +16,6 @@ from app.engine.renewal_logic import (
 )
 from app.models.database import get_db
 from app.models.policy import Policy
-from app.services.email_service import email_service
 
 router = APIRouter(tags=["dashboard"])
 NO_CACHE_HEADERS = {
@@ -64,9 +63,11 @@ def _count_expired_policies(db: Session) -> int:
 
 
 def _count_pending_emails(db: Session) -> int:
+    today = datetime.now(timezone.utc).date()
     return (
         db.query(Policy.id)
         .filter(
+            Policy.expiry_date >= today,
             Policy.status.notin_(["archived"]),
             func.coalesce(Policy.reminder_attempts, 0) == 0,
         )
@@ -130,7 +131,17 @@ def get_pending_emails(
     limit: int = Query(default=200, ge=1, le=1000),
     db: Session = Depends(get_db),
 ):
-    return email_service.list_needs_reply(db, limit=limit)
+    rows = (
+        db.query(Policy)
+        .filter(
+            Policy.status.notin_(["archived"]),
+            func.coalesce(Policy.reminder_attempts, 0) == 0,
+        )
+        .order_by(Policy.expiry_date.asc(), Policy.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+    return [_policy_payload(policy) for policy in rows]
 
 
 @router.get("/reminders/pending")

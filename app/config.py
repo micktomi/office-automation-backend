@@ -45,6 +45,7 @@ class Settings:
     twilio_account_sid: str
     twilio_auth_token: str
     twilio_messaging_service_sid: str
+    whatsapp_gateway_url: str
 
     reminder_days_1: int
     reminder_days_2: int
@@ -110,6 +111,7 @@ def get_settings() -> Settings:
         twilio_account_sid=os.getenv("TWILIO_ACCOUNT_SID", ""),
         twilio_auth_token=os.getenv("TWILIO_AUTH_TOKEN", ""),
         twilio_messaging_service_sid=os.getenv("TWILIO_MESSAGING_SERVICE_SID", ""),
+        whatsapp_gateway_url=os.getenv("WHATSAPP_GATEWAY_URL", "http://localhost:3400/send-message"),
         reminder_days_1=_as_int(os.getenv("REMINDER_DAYS_1"), 30),
         reminder_days_2=_as_int(os.getenv("REMINDER_DAYS_2"), 7),
         insurance_warning_days=_as_int(os.getenv("INSURANCE_WARNING_DAYS"), 90),

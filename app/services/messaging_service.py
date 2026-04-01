@@ -12,7 +12,8 @@ logger = logging.getLogger(__name__)
 class MessagingService:
     def __init__(self):
         self.settings = get_settings()
-        self.whatsapp_url = "http://localhost:3400/send-message"
+        self.whatsapp_url = self.settings.whatsapp_gateway_url
+        logger.info("MessagingService: WhatsApp gateway configured at %s", self.whatsapp_url)
 
     async def send_whatsapp(
         self,

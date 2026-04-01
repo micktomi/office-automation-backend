@@ -6,7 +6,7 @@ from typing import Any
 class MessageRequest(BaseModel):
     phone: str
     message: str
-    provider: str = "whatsapp"  # default provider
+    provider: str = "sms"  # safer production default
 
 class MessageResponse(BaseModel):
     status: str

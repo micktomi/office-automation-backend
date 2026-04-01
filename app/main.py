@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,11 +28,24 @@ from app.routers import (
 from app.services.logging_service import setup_logging
 from app.services.scheduler_service import start_scheduler, stop_scheduler
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     setup_logging(settings.log_level)
+    logger.info(
+        "Startup config | gemini=%s | sms_provider=%s | whatsapp_gateway=%s | google_creds=%s | google_token=%s | frontend=%s | redirect=%s | db_scheme=%s",
+        bool(settings.gemini_api_key),
+        settings.sms_provider or "<empty>",
+        settings.whatsapp_gateway_url,
+        Path(settings.google_credentials_file).exists(),
+        Path(settings.google_token_file).exists(),
+        settings.frontend_url,
+        settings.google_redirect_uri,
+        settings.database_url.split(":", 1)[0],
+    )
 
     # Ensure persistent data directory exists (critical on Render)
     os.makedirs("/app/data", exist_ok=True)

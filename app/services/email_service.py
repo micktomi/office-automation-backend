@@ -126,7 +126,7 @@ class EmailService:
         token_path = os.getenv("GOOGLE_TOKEN_FILE", self.settings.google_token_file)
         
         if not os.path.exists(token_path):
-            print("Google token not found, Gmail integration disabled")
+            logger.warning("EmailService: Google token not found at %s, Gmail integration disabled", token_path)
             return None
 
         try:

@@ -158,7 +158,8 @@ def _build_routing_context(context: dict[str, Any] | None, db: Session) -> str |
             task = task_service.get_task(selected_task_id)
             if task:
                 parts.append(f"Επιλεγμένη εργασία: {task.title}, Προτεραιότητα {task.priority}")
-        except: pass
+        except Exception:
+            logger.exception("Failed to load selected task context for task_id=%s", selected_task_id)
 
     return "\n".join(parts) if parts else None
 
@@ -209,6 +210,13 @@ async def handle_chat_message(
     else:
         action = action.strip()
 
+    logger.info(
+        "Orchestrator intent | action=%s | confidence=%s | context=%s",
+        action,
+        intent_result.get("confidence"),
+        bool(routing_context),
+    )
+
     # Action mapping between AI prompt names and tool actions
     action_map = {
         "list_emails": "email.list",
@@ -239,6 +247,7 @@ async def handle_chat_message(
 
     try:
         payload = _build_tool_payload(mapped_action, message, context)
+        logger.info("Orchestrator tool payload | action=%s | keys=%s", mapped_action, sorted(payload.keys()))
         result = await call_tool(mapped_action, payload, db)
 
         if result["status"] == "success":
@@ -252,6 +261,6 @@ async def handle_chat_message(
         return chat_reply, mapped_action, None
 
     except Exception as e:
-        logger.error("Orchestrator Error: %s", e)
+        logger.exception("Orchestrator Error: %s", e)
         error_reply = await ai_client.chat_response(message, action_result=f"Η ενέργεια απέτυχε: {e}", context_data=_get_data_context(db))
         return error_reply, mapped_action, None

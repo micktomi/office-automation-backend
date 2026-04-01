@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,36 @@ class AIClient:
             cleaned = cleaned[:-3]
         return cleaned.strip()
 
+    @staticmethod
+    def _heuristic_route_intent(user_message: str, conversation_context: str | None = None) -> dict[str, Any]:
+        text = " ".join(part for part in [conversation_context or "", user_message] if part).casefold()
+
+        rules: list[tuple[str, tuple[str, ...], str, float]] = [
+            ("sync_inbox", ("sync inbox", "συγχρον", "update inbox", "refresh inbox"), "Συγχρονίζω το inbox.", 0.95),
+            ("scan_insurance", ("scan insurance", "σκαν", "λήξ", "ληξ", "συμβολ", "renewal"), "Ψάχνω για λήξεις συμβολαίων.", 0.95),
+            ("list_insurance_alerts", ("alerts", "ειδοποι", "λήξεις ασφαλισ", "expiring"), "Ελέγχω τις λήξεις ασφαλιστηρίων.", 0.9),
+            ("generate_reply", ("draft reply", "απάντη", "reply", "απάντηση"), "Ετοιμάζω draft απάντησης.", 0.85),
+            ("list_needs_reply", ("needs reply", "χρειάζονται απάντηση", "χωρίς απάντηση"), "Φιλτράρω τα emails που περιμένουν απάντηση.", 0.85),
+            ("list_emails", ("emails", "email", "mail"), "Ορίστε τα emails σου.", 0.8),
+            ("list_calendar", ("calendar", "ημερολόγ", "ραντεβ", "meeting"), "Ελέγχω το ημερολόγιο.", 0.8),
+            ("create_calendar_event", ("βάλε ραντεβού", "κλείσε ραντεβού", "schedule", "create event"), "Προσθέτω το ραντεβού.", 0.85),
+            ("delete_calendar_event", ("διάγραψ", "ακύρ", "cancel event", "delete event"), "Διαγράφω το ραντεβού.", 0.85),
+            ("list_tasks", ("tasks", "εργασ", "εκκρεμ"), "Ορίστε τα εκκρεμή tasks.", 0.8),
+            ("create_task", ("πρόσθεσε task", "add task", "θυμίσου", "remind me"), "Προσθέτω το task.", 0.85),
+            ("complete_task", ("τελείωσ", "ολοκλήρ", "done", "finished"), "Σημειώνω το task ως ολοκληρωμένο.", 0.85),
+            ("batch_sms_reminders", ("batch sms", "μαζικά sms", "sms reminders"), "Στέλνω μαζικά SMS υπενθύμισης.", 0.9),
+            ("send_message", ("στείλε μήνυμα", "send message", "ενημέρωσε τον πελάτη"), "Ετοιμάζω το μήνυμα προς αποστολή.", 0.9),
+        ]
+
+        for action, keywords, response, confidence in rules:
+            if any(keyword in text for keyword in keywords):
+                return {"action": action, "response": response, "confidence": confidence}
+
+        if re.search(r"\b(sms|whatsapp|μήνυμα|message)\b", text):
+            return {"action": "send_message", "response": "Ετοιμάζω το μήνυμα προς αποστολή.", "confidence": 0.75}
+
+        return {"action": "chat", "response": "Πώς μπορώ να βοηθήσω;", "confidence": 0.5}
+
     async def _generate_content(
         self, prompt: str, *, json_mode: bool = False, temperature: float = 0.2
     ) -> str:
@@ -72,8 +103,9 @@ class AIClient:
 
     async def route_intent(self, user_message: str, conversation_context: str | None = None) -> dict[str, Any]:
         """Route user message to the appropriate action via intent_router prompt."""
-        fallback = {"action": "chat", "response": "Πώς μπορώ να βοηθήσω;", "confidence": 0.5}
+        fallback = self._heuristic_route_intent(user_message, conversation_context)
         if not self._client:
+            logger.warning("Gemini client unavailable. Using heuristic intent router.")
             return fallback
 
         prompt_template = (PROMPTS_DIR / "intent_router.md").read_text(encoding="utf-8")
@@ -97,7 +129,7 @@ class AIClient:
     async def chat_response(self, user_message: str, action_result: str | None = None, context_data: str | None = None) -> str:
         """Fallback chat when no specific tool is called or to explain an error."""
         if not self._client:
-            return "Δεν υπάρχει εγκατεστημένο AI για συνομιλία."
+            return "Μπορώ να βοηθήσω με emails, συμβόλαια, calendar, tasks και μηνύματα."
 
         prompt = (
             "Είσαι ο Geminako (Γεμινάκος), ο έξυπνος βοηθός ενός ασφαλιστικού γραφείου. "

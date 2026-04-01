@@ -27,6 +27,11 @@ class InsuranceService:
     def __init__(self) -> None:
         self.settings = get_settings()
 
+    @staticmethod
+    def _looks_like_phone(value: str | None) -> bool:
+        digits = re.sub(r"\D+", "", value or "")
+        return len(digits) >= 10
+
     def _get_or_create_client(self, db: Session, name: str, email: str | None = None) -> Client:
         # Try to find by email first if provided
         if email and email != "unknown@unknown":
@@ -248,12 +253,19 @@ class InsuranceService:
 
         text = normalize_text(text)
         patterns = [
-            r"(?:πελάτης|πελατης|ασφαλισμένος|ασφαλισμενος|policy\s*holder|insured)\s*:\s*([A-Za-zΑ-ΩΆ-Ώα-ωά-ώ\s]{3,})",
+            r"(?:πελάτης|πελατης|ασφαλισμένος|ασφαλισμενος|policy\s*holder|insured)\s*:\s*(.+?)(?:\n|$)",
         ]
         for pattern in patterns:
             match = re.search(pattern, text, flags=re.IGNORECASE)
             if match:
-                return " ".join(match.group(1).split()).strip()
+                candidate = " ".join(match.group(1).split()).strip()
+                candidate = re.split(
+                    r"\s+(?:έναρξη|εναρξη|λήξη|ληξη|ημερομηνία|ημερομηνια|αριθμός|αριθμος|policy|insured)\b",
+                    candidate,
+                    maxsplit=1,
+                    flags=re.IGNORECASE,
+                )[0].strip(" :-,.;")
+                return candidate or None
         return None
 
     @staticmethod
@@ -626,10 +638,19 @@ class InsuranceService:
         failed_count = 0
         
         for policy in policies:
-            # Basic mobile validation (Greek numbers usually start with 69)
-            phone = str(policy.email) # Assuming email field might contain phone or we need to find phone
-            # Note: In a real scenario, Policy should have a phone field. 
-            # If it doesn't, we'll try to use a placeholder or log an error.
+            phone = None
+            if policy.client and policy.client.phone:
+                phone = policy.client.phone.strip()
+            elif self._looks_like_phone(policy.email):
+                phone = str(policy.email).strip()
+
+            if not phone:
+                logger.warning(
+                    "Batch SMS skipped for policy %s because no client phone exists",
+                    policy.id,
+                )
+                failed_count += 1
+                continue
             
             message = (
                 f"Γεια σας {policy.client_name}, το συμβόλαιό σας {policy.policy_number or ''} "
@@ -637,15 +658,7 @@ class InsuranceService:
                 "Επικοινωνήστε μαζί μας για ανανέωση. INC-AGENT"
             )
             
-            # Since our Policy model doesn't have a phone field yet (based on previous reads), 
-            # let's check if we can find one. For now, I'll use policy.email as a proxy 
-            # or skip if it's not a number.
-            
-            # TODO: Add phone field to Policy model
-            
             try:
-                # We attempt to send. If phone is invalid, it will fail gracefully.
-                # In this demo/prototype, we'll log it.
                 res = await messaging_service.send_sms(
                     to=phone, 
                     message=message, 

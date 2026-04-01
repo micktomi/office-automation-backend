@@ -80,7 +80,7 @@ async def _messaging_send(payload: dict[str, Any], db: Session) -> Any:
     del db
     phone = payload.get("phone") or payload.get("to")
     message = payload.get("message") or payload.get("text")
-    provider = str(payload.get("provider") or "whatsapp").lower()
+    provider = str(payload.get("provider") or "sms").lower()
     client_name = payload.get("client_name")
     policy_number = payload.get("policy_number")
 

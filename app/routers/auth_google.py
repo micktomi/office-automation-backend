@@ -51,13 +51,13 @@ def _set_code_verifier_cookie(response, code_verifier: str) -> None:
 def google_start(request: Request):
     try:
         redirect_uri = _build_redirect_uri(request)
-        print("REDIRECT_URI =", redirect_uri, flush=True)
+        logger.info("Google start redirect_uri=%s", redirect_uri)
         flow = get_google_flow(redirect_uri=redirect_uri, autogenerate_code_verifier=True)
         auth_url, state = flow.authorization_url(
             prompt="select_account consent",
             access_type="offline",
         )
-        print("AUTH_URL =", auth_url, flush=True)
+        logger.info("Google start auth_url=%s", auth_url)
 
         code_verifier = _get_code_verifier(flow)
         if state and code_verifier:
@@ -80,13 +80,13 @@ def google_start(request: Request):
 def google_login_alias(request: Request):
     try:
         redirect_uri = _build_redirect_uri(request)
-        print("REDIRECT_URI =", redirect_uri, flush=True)
+        logger.info("Google login redirect_uri=%s", redirect_uri)
         flow = get_google_flow(redirect_uri=redirect_uri, autogenerate_code_verifier=True)
         auth_url, state = flow.authorization_url(
             prompt="select_account consent",
             access_type="offline",
         )
-        print("AUTH_URL =", auth_url, flush=True)
+        logger.info("Google login auth_url=%s", auth_url)
 
         code_verifier = _get_code_verifier(flow)
         if state and code_verifier:
