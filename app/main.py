@@ -35,8 +35,11 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     settings = get_settings()
     setup_logging(settings.log_level)
+    backend_root = Path(__file__).resolve().parents[1]
+    data_dir = Path(os.getenv("DATA_DIR", str(backend_root / "data"))).expanduser()
+    data_dir.mkdir(parents=True, exist_ok=True)
     logger.info(
-        "Startup config | gemini=%s | sms_provider=%s | whatsapp_gateway=%s | google_creds=%s | google_token=%s | frontend=%s | redirect=%s | db_scheme=%s",
+        "Startup config | gemini=%s | sms_provider=%s | whatsapp_gateway=%s | google_creds=%s | google_token=%s | frontend=%s | redirect=%s | db_scheme=%s | data_dir=%s",
         bool(settings.gemini_api_key),
         settings.sms_provider or "<empty>",
         settings.whatsapp_gateway_url,
@@ -45,10 +48,8 @@ async def lifespan(app: FastAPI):
         settings.frontend_url,
         settings.google_redirect_uri,
         settings.database_url.split(":", 1)[0],
+        data_dir,
     )
-
-    # Ensure persistent data directory exists (critical on Render)
-    os.makedirs("/app/data", exist_ok=True)
 
     # Import models to ensure they are registered
     from app.models import user, activity_log, client, email_message, policy, reminder_log
