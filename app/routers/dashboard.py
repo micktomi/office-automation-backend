@@ -63,13 +63,13 @@ def _count_expired_policies(db: Session) -> int:
 
 
 def _count_pending_emails(db: Session) -> int:
-    today = datetime.now(timezone.utc).date()
+    from app.models.email_message import SyncedEmail
     return (
-        db.query(Policy.id)
+        db.query(SyncedEmail)
         .filter(
-            Policy.expiry_date >= today,
-            Policy.status.notin_(["archived"]),
-            func.coalesce(Policy.reminder_attempts, 0) == 0,
+            SyncedEmail.unread == True,
+            SyncedEmail.classification != "irrelevant",
+            SyncedEmail.status == "inbox",
         )
         .count()
     )

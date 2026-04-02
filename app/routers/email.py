@@ -25,15 +25,19 @@ def _try_parse_policy_id(email_id: str) -> int | None:
 def list_emails(
     include_archived: bool = Query(default=False),
     include_noise: bool = Query(default=False),
+    pending_only: bool = Query(default=False),
     limit: int = Query(default=20, ge=1, le=200),
     db: Session = Depends(get_db),
 ):
-    return email_service.list_emails(
+    emails = email_service.list_emails(
         db,
         include_archived=include_archived,
         include_noise=include_noise,
         limit=limit,
     )
+    if pending_only:
+        emails = [e for e in emails if e.get("unread") and e.get("status") == "inbox"]
+    return emails
 
 
 @router.post("/sync", response_model=EmailSyncResult)
