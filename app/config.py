@@ -128,9 +128,9 @@ def get_settings() -> Settings:
             "https://www.googleapis.com/auth/userinfo.profile",
             "openid",
         ),
-        google_redirect_uri=os.getenv("GOOGLE_REDIRECT_URI", "http://127.0.0.1:3001/auth/google/callback").strip(),
+        google_redirect_uri=os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:3001/auth/google/callback").strip(),
         gemini_api_key=os.getenv("GEMINI_API_KEY"),
-        gemini_model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
+        gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview"),
     )
 
 

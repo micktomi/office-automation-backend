@@ -25,8 +25,11 @@ def _load_credentials_blocking(settings: Settings) -> Credentials | None:
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())
     elif creds_path.exists():
-        flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), settings.google_scopes)
-        creds = flow.run_local_server(port=0)
+        # NEVER use InstalledAppFlow with 'Web' client IDs in a server environment.
+        # It triggers a policy violation (invalid_request 400).
+        # User must login via the /auth/google/start web flow.
+        logger.warning("Google credentials found but no valid token. Please login via web UI.")
+        return None
     else:
         return None
 
