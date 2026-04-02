@@ -58,7 +58,6 @@ class Settings:
     gemini_api_key: str | None
     gemini_model: str
 
-    @property
     def get_token_path(self, user_email: str | None = None) -> str:
         if not user_email:
             return self.google_token_file

@@ -23,7 +23,11 @@ logger = logging.getLogger(__name__)
 
 
 def _build_redirect_uri(request: Request) -> str:
-    return get_settings().google_redirect_uri
+    uri = get_settings().google_redirect_uri
+    # Force HTTPS for Render/Production
+    if "onrender.com" in uri and uri.startswith("http://"):
+        uri = uri.replace("http://", "https://")
+    return uri
 
 
 def _get_code_verifier(flow) -> str | None:
